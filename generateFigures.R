@@ -1017,7 +1017,7 @@ for(i in sourceOrganismsOrdered){
         myDF = read.table(filename, sep="\t")
         myDF=myDF[,c(2:3)]
         names(myDF) <- c("position","coverage")
-        myDF$sample = paste(i,"_",j,"_",k,sep="")
+        myDF$sample = paste(i,j,", t",k,sep="")
         coveragePlotDF = rbind(coveragePlotDF,myDF)
         #p1<-ggplot(myDF)+geom_point(aes(x=x,y=y)) + theme_bw()+xlab("Genomic Coordinate")+ylab("1kb average coverage")+ geom_vline(xintercept=c(3420000,3520000), color = "red", linetype="longdash")+ggtitle(paste(i,'-',j,', t',k,sep=""))+theme(axis.title=element_text(size=16),axis.text=element_text(size=12),plot.title=element_text(size=20))
         #ggsave(p1,file=paste(outputDir,"coverage_plots/",i,"_",j,"_",k,"_covPlot.png",sep=""),width=120,height=80,units="mm")
@@ -1027,7 +1027,7 @@ for(i in sourceOrganismsOrdered){
 }
 
 #plots to include
-plotsToUse = c("V_1_100", "V_3_700", "V_5_600", "A_1_100", "A_2_600", "A_3_100", "A_4_700", "A_5_100", "A_6_100", "P_4_100", "P_6_200")
+plotsToUse = c("V1, t100", "V3, t700", "V5, t600", "A1, t100", "A2, t600", "A3, t100", "A4, t700", "A5, t100", "A6, t100", "P4, t100", "P6, t200")
 coveragePlotDFTrunc = coveragePlotDF[coveragePlotDF$sample %in% plotsToUse,]
 
 p1<-ggplot(coveragePlotDFTrunc)+geom_point(aes(x=position,y=coverage)) + theme_bw()+xlab("Genomic Coordinate")+ylab("1kb average coverage")+ geom_vline(xintercept=c(3420000,3520000), color = "red", linetype="longdash")+theme(axis.title=element_text(size=16),axis.text=element_text(size=12,colour="black"),plot.title=element_text(size=20),strip.text=element_text(size=20),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"))+facet_wrap(sample~.,ncol=3,scales="free_y")
