@@ -1107,7 +1107,7 @@ geneLengths = read.table(paste(dataInputDir,"MG1655_geneLengths.tab",sep=""),sep
 multinomResultsGenes = c()
 multinomResultsMuts = c()
 for(i in c(1:10000)){
-  multRes =   rmultinom(1,NROW(selectedMutsMultipleHits),geneLengths$V4)
+  multRes =   rmultinom(1,NROW(selectedMuts),geneLengths$V4)
   multinomResultsGenes = c(multinomResultsGenes, sum(multRes>1))
   multinomResultsMuts = c(multinomResultsMuts, sum(multRes[multRes>1]))
 }
@@ -1117,7 +1117,7 @@ print(100*mean(multinomResultsMuts)/(NROW(selectedMutsMultipleHits)))
 multinomResultsGenes = c()
 multinomResultsMuts = c()
 for(i in c(1:10000)){
-  multRes =   rmultinom(1,NROW(selectedMutsLowMultipleHits),geneLengths$V4)
+  multRes =   rmultinom(1,NROW(selectedMutsLowThresh),geneLengths$V4)
   multinomResultsGenes = c(multinomResultsGenes, sum(multRes>1))
   multinomResultsMuts = c(multinomResultsMuts, sum(multRes[multRes>1]))
 }
