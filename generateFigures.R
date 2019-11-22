@@ -92,7 +92,7 @@ getFitnessData <- function(myInputFile){
 			myModelSummary = summary(myModel)
 			sEstimate = myModelSummary$coefficients[2]
 			stderrEstimate = myModelSummary$coefficients[4]
-			varianceEstimate = (stderrEstimate * sqrt(myModelSummary$df[2]+1))**2
+			varianceEstimate = (stderrEstimate * sqrt(myModelSummary$df[2]+1))**2 #back calculate variance from stderr and df
 			experimentfitnessDF = rbind(experimentfitnessDF,data.frame(Name=as.character(flask),Fitness = sEstimate, stderror = stderrEstimate, variance = varianceEstimate))
 		}
 		
@@ -104,10 +104,11 @@ getFitnessData <- function(myInputFile){
 		newAverage = estimatesToUse$Fitness
 		newStdErr = estimatesToUse$stderror
 		if(NROW(estimatesToUse)>1){
-			#if there is missing variance data when trying to average, set the variance to the average of the other variances
+			#if there is missing variance data when trying to average, set the variance to the average of the other variances (e.g. if there are only 2 valid timepoints of data for that replicate)
 			estimatesToUse$variance[is.na(estimatesToUse$variance)] = mean(estimatesToUse$variance,na.rm=TRUE)
-			newVariance = 1 / sum(1/estimatesToUse$variance)
-			newAverage = sum(estimatesToUse$Fitness / estimatesToUse$variance) * newVariance
+			weightedAvg = varWeightedAverage(estimatesToUse$Fitness, estimatesToUse$variance)
+			newVariance = weightedAvg[2]
+			newAverage = weightedAvg[1]
 			newStdErr = sqrt(newVariance) / sqrt(NROW(estimatesToUse)-1)
 		}
 		experimentfitnessDF = rbind(experimentfitnessDF,data.frame(Name=paste(experiment,"allFlasks_averaged",sep="_"),Fitness = newAverage, stderror = newStdErr, variance = newVariance))
@@ -124,8 +125,8 @@ ancFitnessDF = getFitnessData(ancestorFile)
 
 #The expected fitness value of competition between two E strains is 0. The observed fitness is used to calculate variance of the fitness estimation
 ancFitnessDF$Fitness[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=0
-ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=sum((ancFitnessDF$Fitness[1:4])^2)
-ancFitnessDF$stderror[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=sqrt(sum((ancFitnessDF$Fitness[1:4])^2))
+ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=mean((ancFitnessDF$Fitness[1:4])^2)
+ancFitnessDF$stderror[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=sqrt(mean((ancFitnessDF$Fitness[1:4])^2))
 
 write.table(ancFitnessDF,file=paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE)
 
@@ -193,7 +194,7 @@ initialTimecourseDataProcessing <- function(outputFileName){
         if(myReadFreqs[1]>0 & sum(testVals,na.rm=TRUE) < sum(!is.na(testVals)) ){ #mutations present in the beginning should fix or be lost by gen 900 / 1000, remove if this is not the case
           next
         }
-        if(sum(myReadCounts[1:(myNumTimepoints-1)] > 0 & myReadCounts[2:myNumTimepoints] > 0) ==0){ #skip mutation if it is only present in one timepoint
+        if(sum(myReadCounts > 0 ) <=1){ #skip mutation if it is only present in one timepoint
           next
         }
         
@@ -214,7 +215,8 @@ initialTimecourseDataProcessing <- function(outputFileName){
             curMutPos = curMutPos + 1185
           }
           if(curMutPos>3470744 & founderStrain == "P"){ # The pseudomonas tufA is 9bp longer than every other tufA due to a 3AA insertion around AA 195. 
-            curMutPos = curMutPos + 9
+            print("here!")
+            curMutPos = curMutPos - 9
           }
           mutPos[curMutID] = curMutPos
           curMutID = curMutID + 1
@@ -256,9 +258,15 @@ initialTimecourseDataProcessing <- function(outputFileName){
   founderMuts[which(apply(readFreqs[,1,31:36],1,function(x) sum(x,na.rm=TRUE)/6) > thr_fixfreq)]=TRUE
   founderMuts = founderMuts & ! ancMuts
   
+  print("Number of ancestral muts")
+  print(sum(ancMuts))
+  print("Number of founder-specific muts")
+  print(sum(founderMuts))
   #mutations that are present at any frequency at t100 in 10+ populations are likely mapping artifacts
-  badMuts = apply(readFreqs[,2,],1,function(x) sum(x>0,na.rm=TRUE)) > 10
- 
+  badMuts = apply(readFreqs[,2,],1,function(x) sum(x>0,na.rm=TRUE)) > 11
+  print("Number of muts present at any freq at t100 in 11+ populations")
+  print(sum(badMuts))
+  
   goodMuts = array(FALSE,c(numRows,numPops)) #check to make sure a mutation is present at some minimum frequency in at least one timepoint and detected in at least 2 consecutive timepoints, otherwise it is likely an artifact
   checkFreqTraj <- function(x){ 
     t2 = sum(myReadCounts[1:(myNumTimepoints-1)] > 0 & myReadCounts[2:myNumTimepoints] > 0, na.rm=TRUE) >0 #check if mutation is present in at least 2 consecutive timepoints
@@ -342,7 +350,7 @@ initialTimecourseDataProcessing <- function(outputFileName){
       if(grepl("upstream", annoSplit[1])){ 
         upGeneStr = locusSplit[locationSplit=="upstream"]
         myUpstreamGene = gsub(".*_","",upGeneStr)
-        myGene = myUpstreamGene #annotate gene as upstream gene, even if downstream gene exists
+        myGene = myUpstreamGene #annotate gene as upstream gene, even if downstream gene exists, since it is more likely to regulate the gene it is upstream of
       }
     }
     
@@ -398,6 +406,8 @@ initialTimecourseDataProcessing <- function(outputFileName){
   
   write.table(allMutFile,file=allMutFileName,row.names=FALSE,col.names=FALSE,quote=FALSE,sep="\t")
 }
+initialTimecourseDataProcessing()
+
 allMutFile<-read.table(allMutFileName,sep="\t",header=FALSE)
 selectedMuts = allMutFile[apply(allMutFile[,12:22],1,function(x){max(x,na.rm=TRUE)-min(x,na.rm=TRUE)>0.2}),] #selected mutations are those that changed at least 20% frequency across the experiment
 selectedMutsLowThresh = allMutFile[apply(allMutFile[,12:22],1,function(x){max(x,na.rm=TRUE)-min(x,na.rm=TRUE)>0.1}),] #to see the robustness of this cutoff, we lower it to 10%
@@ -416,7 +426,7 @@ write.table(selectedMutsLowThresh, file=lowSelectedMutFileName,sep="\t",col.name
 ###############################
 
 fitnessDF = read.table(paste(outputDir,"rawFitnessData.tab",sep=""),sep="\t",header=TRUE)
-ancFitnessDF = read.table(paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",header=TRUE)
+ancFitnessDF = read.table(paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",header=TRUE) #anc fitness is calculating fitness of E strain relative to the different founders, so need to negate the fitness estimates to get founder fitness relative to E
 
 ancFitnessDFTrunc = ancFitnessDF[grep("allFlasks_averaged", ancFitnessDF$Name),]
 fitnessDFTrunc = fitnessDF[grep("allFlasks_averaged", fitnessDF$Name),]
@@ -440,15 +450,14 @@ fitnessFounderListFactor = factor(fitnessFounderList, levels = sourceOrganismsOr
 
 ancFitnessFounderList = gsub(" .*","",ancFitnessDFTrunc$Name)
 ancFitnessFounderListFactor = factor(ancFitnessFounderList, levels = sourceOrganismsOrdered)
-
-
 ancFitnessDFTrunc$Founder = ancFitnessFounderList
 
+# calculate average fitness gain across all populations derived from each founder
 mydf = data.frame(species = character(), evoFitness = numeric(), evoFitnessSEM=numeric(),ancFitness=numeric(), ancFitnessSEM = numeric())
 for(organism in sourceOrganismsOrdered){
   observedFitnessVals = fitnessDFTrunc$Fitness[fitnessFounderList == organism]
   observedFitnessVarVals = fitnessDFTrunc$variance[fitnessFounderList == organism]
-  weightedFitnessAndVar = varWeightedAverage(observedFitnessVals,observedFitnessVarVals) #calculate inverse variance weighted average fitness gain across all populations derived from this founder
+  weightedFitnessAndVar = varWeightedAverage(observedFitnessVals,observedFitnessVarVals)
   mydf = rbind(mydf, data.frame(species = organism, evoFitness = weightedFitnessAndVar[1],evoFitnessSEM = sqrt(weightedFitnessAndVar[2])/sqrt(sum(fitnessFounderList == organism)), ancFitness = ancFitnessDFTrunc$Fitness[ancFitnessDFTrunc$Founder==organism], ancFitnessSEM = ancFitnessDFTrunc$stderror[ancFitnessDFTrunc$Founder==organism]))
 }
 mydf$species = factor(mydf$species, levels = sourceOrganismsOrdered)
@@ -502,12 +511,8 @@ selectedMutsLowMultipleHits = selectedMutsLowMultipleHits[selectedMutsLowMultipl
 
 
 
-trajectoryPlotTableFunction <- function(selectedMuts){
-  
-  mutHitCounts = plyr::count(selectedMuts$V1)
-  selectedMutsMultipleHits = selectedMuts[!is.na(match(selectedMuts$V1,mutHitCounts$x[mutHitCounts$freq>1])),]
-  selectedMutsMultipleHits = selectedMutsMultipleHits[selectedMutsMultipleHits$V1 != "",]
-  myTab = selectedMuts[,c(1,2,11:22)]
+trajectoryPlotTableFunction <- function(selMuts){
+  myTab = selMuts[,c(1,2,11:22)]
   meltedTable = melt(myTab,id.vars=c("V1","V2","V11"))
   meltedTable <- na.omit(meltedTable)
   meltedTable$variable = (c(0:10)*100)[match(meltedTable$variable, c("V12","V13","V14","V15","V16","V17","V18","V19","V20","V21","V22"))]
@@ -522,9 +527,10 @@ trajectoryPlotTableFunction <- function(selectedMuts){
   return(meltedTable)
 }
 
+ #divide the plot into 10 positions between 0 and 100% and order gene labels to be close to their actual trajectories without having labels overlap each other
 trajectoryPlotLabelFunction <- function(a){
   a$pasted = paste(a$V1,a$V11)
-  labelDB = data.frame(popTitle = factor(levels=levels(meltedTable$popTitle)), timepoint = numeric(), freq = numeric(), gene = character())
+  labelDB = data.frame(popTitle = factor(levels=levels(a$popTitle)), timepoint = numeric(), freq = numeric(), gene = character())
   for(x in unique(a$pasted)){
     myRow = which(a$pasted == x & a$variable == max(a$variable[a$pasted==x]))
     myFreq = a$value[myRow]
@@ -788,11 +794,6 @@ reconstructedFitnessDF$variance = reconstructedFitnessDF$variance*100^2
 reconstructedFitnessDFTrunc = reconstructedFitnessDF[grep("allFlasks_averaged", reconstructedFitnessDF$Name),]
 
 
-reconstructedFitnessDFTrunc2 = reconstructedFitnessDFTrunc[c(2,1),]
-print(reconstructedFitnessDFTrunc2)
-
-
-
 ###############################
 #
 # Figure 4
@@ -967,15 +968,6 @@ ggsave(p3,file=paste(outputDir,"Figure4.svg",sep=""),width=180,height=100, units
 ggsave(p3,file=paste(outputDir,"Figure4.png",sep=""),width=180,height=100, units="mm")
 
 
-
-
-print("TM-specific randomizations")
-print(geneEntropyDFTM)
-
-
-print("Generic randomizations")
-print(geneEntropyDFGeneric)
-
 ###############################
 #
 # Figure 5
@@ -1085,7 +1077,6 @@ write.table(selectedMuts2, file=TableS1FileName,sep="\t",col.names=TRUE,quote=FA
 print("Founder fitness")
 print(ancFitnessDFTrunc)
 
-print("Average fitness gain of all non-E founders")
 fitnessFounderList = gsub("_.*","",fitnessDFTrunc$Name)
 fitnessFounderListFactor = factor(fitnessFounderList, levels = sourceOrganismsOrdered)
 ancFitnessFounderList = gsub(" .*","",ancFitnessDFTrunc$Name)
@@ -1094,8 +1085,10 @@ ancFitnessDFTrunc$Founder = ancFitnessFounderList
 x = ancFitnessDFTrunc$Fitness[match(fitnessFounderList,ancFitnessFounderList)]
 y = fitnessDFTrunc$Fitness
 fractionFitnessGain = y/x
-#print(mean(fractionFitnessGain[fitnessFounderList %in% c("V","P","A")]))
-print(mean((x-y)[! fitnessFounderList %in% c("E","S","Y")]))
+
+print("Average % fitness recovery of evolved V, A and P populations relative to E assuming fitness transitivity")
+print(mean(fractionFitnessGain[fitnessFounderList %in% c("V","A","P")]))
+
 
 print("number of evolved populations that did not significantly increase in fitness, B-H correction")
 print(sum(p.adjust(sort(pt(-abs(fitnessDFTrunc$Fitness/fitnessDFTrunc$stderror),df=3)),method="BH")>=0.05))
@@ -1114,18 +1107,32 @@ geneLengths = read.table(paste(dataInputDir,"MG1655_geneLengths.tab",sep=""),sep
 multinomResultsGenes = c()
 multinomResultsMuts = c()
 for(i in c(1:10000)){
-  multRes =   rmultinom(1,NROW(selectedMuts),geneLengths$V4)
+  multRes =   rmultinom(1,NROW(selectedMutsMultipleHits),geneLengths$V4)
   multinomResultsGenes = c(multinomResultsGenes, sum(multRes>1))
   multinomResultsMuts = c(multinomResultsMuts, sum(multRes[multRes>1]))
 }
 print("Expected FDR (%) of adapted mutations")
 print(100*mean(multinomResultsMuts)/(NROW(selectedMutsMultipleHits)))
 
+multinomResultsGenes = c()
+multinomResultsMuts = c()
+for(i in c(1:10000)){
+  multRes =   rmultinom(1,NROW(selectedMutsLowMultipleHits),geneLengths$V4)
+  multinomResultsGenes = c(multinomResultsGenes, sum(multRes>1))
+  multinomResultsMuts = c(multinomResultsMuts, sum(multRes[multRes>1]))
+}
+print("Expected FDR (%) of adapted mutations w/ low threshold for calling variants")
+print(100*mean(multinomResultsMuts)/(NROW(selectedMutsLowMultipleHits)))
+
+
 print("Number of TM-specific adaptive mutations")
 print(sum(selectedMutsMultipleHits$V1 %in% translationGenes) + NROW(chrAmptufAPopulations))
 
 print("Number of TM-specific adapted genes")
 print(NROW(unique(c(as.character(selectedMutsMultipleHits$V1[selectedMutsMultipleHits$V1 %in% translationGenes]),"tufA"))))
+
+print("Number of TM annotated genes in the genome")
+print(NROW(translationGenes))
 
 multinomResultsGenes = c()
 multinomResultsMuts = c()
@@ -1140,8 +1147,16 @@ print(sum(multinomResultsMuts <= sum(selectedMutsMultipleHits$V1 %in% translatio
 print("Num translation genes")
 print(NROW(translationGenes))
 
-print("Percentage of E. coli genome that is translation genes")
-print(sum(geneLengths$V4[geneLengths$V1 %in% translationGenes]) / sum(geneLengths$V4))
+
+print("Percentage of E. coli genome that is the CDS of TM annotated genes")
+positionValues = rep(0,4641652)
+for(gene in translationGenes){
+  myRow = geneLengths[geneLengths$V1 == gene,]
+  if(NROW(myRow)==1){
+    positionValues[c(myRow$V2:myRow$V3)]=1
+  }
+}
+print(sum(positionValues)/4641652)
 
 print("Num populations with TM-specific mutations")
 print(NROW(unique(c(as.character(selectedMutsMultipleHits$V11[as.character(selectedMutsMultipleHits$V1) %in% translationGenes]),chrAmptufAPopulations ))))
@@ -1177,3 +1192,24 @@ print(sum(firstGenOverThreshAll[which(! selectedMutsMultipleHitsLowFitnessFounde
 
 print("Mean fitness gain of Y populations")
 print(mean(fitnessDFTrunc$Fitness[fitnessFounderList=="Y"]))
+
+print("Avg num TM-specific fixations in V, A and P populations")
+print(as.numeric(colSums(TMGeneFixCounts[,3:8])[2])/18)
+
+print("Average fitness deficit (% per generation) of evolved V, A and P populations relative to E assuming fitness transitivity")
+print(mean((x-y)[fitnessFounderList %in% c("V","A","P")]))
+
+print("Fitness gains of reconstructed mutations")
+print(reconstructedFitnessDFTrunc[c(1:2),])
+
+print("TM-specific founder entropy by gene randomizations")
+print(geneEntropyDFTM)
+
+print("Generic founder entropy by gene randomizations")
+print(geneEntropyDFGeneric)
+
+print("Fitness defect of E relative to wt E. coli")
+EvsWTFitnessDF$Fitness = EvsWTFitnessDF$Fitness*100
+EvsWTFitnessDF$stderror = EvsWTFitnessDF$stderror*100
+EvsWTFitnessDF$variance = EvsWTFitnessDF$variance*100^2
+print(EvsWTFitnessDF[NROW(EvsWTFitnessDF),])
