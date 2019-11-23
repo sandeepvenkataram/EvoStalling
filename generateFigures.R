@@ -1077,17 +1077,6 @@ write.table(selectedMuts2, file=TableS1FileName,sep="\t",col.names=TRUE,quote=FA
 print("Founder fitness")
 print(ancFitnessDFTrunc)
 
-fitnessFounderList = gsub("_.*","",fitnessDFTrunc$Name)
-fitnessFounderListFactor = factor(fitnessFounderList, levels = sourceOrganismsOrdered)
-ancFitnessFounderList = gsub(" .*","",ancFitnessDFTrunc$Name)
-ancFitnessFounderListFactor = factor(ancFitnessFounderList, levels = sourceOrganismsOrdered)
-ancFitnessDFTrunc$Founder = ancFitnessFounderList
-x = ancFitnessDFTrunc$Fitness[match(fitnessFounderList,ancFitnessFounderList)]
-y = fitnessDFTrunc$Fitness
-fractionFitnessGain = y/x
-
-print("Average % fitness recovery of evolved V, A and P populations relative to E assuming fitness transitivity")
-print(mean(fractionFitnessGain[fitnessFounderList %in% c("V","A","P")]))
 
 
 print("number of evolved populations that did not significantly increase in fitness, B-H correction")
@@ -1197,6 +1186,13 @@ print("Avg num TM-specific fixations in V, A and P populations")
 print(as.numeric(colSums(TMGeneFixCounts[,3:8])[2])/18)
 
 print("Average fitness deficit (% per generation) of evolved V, A and P populations relative to E assuming fitness transitivity")
+fitnessFounderList = gsub("_.*","",fitnessDFTrunc$Name)
+fitnessFounderListFactor = factor(fitnessFounderList, levels = sourceOrganismsOrdered)
+ancFitnessFounderList = gsub(" .*","",ancFitnessDFTrunc$Name)
+ancFitnessFounderListFactor = factor(ancFitnessFounderList, levels = sourceOrganismsOrdered)
+ancFitnessDFTrunc$Founder = ancFitnessFounderList
+x = ancFitnessDFTrunc$Fitness[match(fitnessFounderList,ancFitnessFounderList)]
+y = fitnessDFTrunc$Fitness
 print(mean((x-y)[fitnessFounderList %in% c("V","A","P")]))
 
 print("Fitness gains of reconstructed mutations")
