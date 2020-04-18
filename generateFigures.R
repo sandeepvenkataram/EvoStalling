@@ -3,7 +3,6 @@ library(plyr)
 library(reshape2)
 library(png)
 library(dplyr)
-library(gridExtra)
 library(egg)
 library(RColorBrewer)
 ##############################
@@ -21,8 +20,8 @@ possibleMutTypes = c("Chr amp","NCOD","NCRNA","NSYN","STOPGAIN","STOPLOSS","SYN"
 renamedMutTypes = c("Chr amp","Noncoding","Other","Nonsynonymous","Other","Other","Synonymous")
 renamedMutTypesOrder = c("Nonsynonymous","Synonymous","Other","Chr amp","Noncoding")
 mutImportanceOrder = c("Chr amp","FRAMESHIFT","STOPGAIN","STOPLOSS","NSYN","SYN","NCOD","NCRNA","")
-cbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#0072B2", "#D55E00", "#CC79A7","#999999")
-speciesColors = cbPalette[1:6]
+cbPalette <- brewer.pal(8,"Dark2")
+speciesColors = cbPalette[c(1,3:7)]
 names(speciesColors) <- sourceOrganismsOrdered
 
 
@@ -60,7 +59,7 @@ varWeightedAverage = function(meanVals,varVals){
 
 ###############################
 #
-# Calculate Fitness from competition assays
+# Calculate Fitness from competition assays, raw data for Datasets S1, S2, S3, S5 and S6
 #
 ###############################
 
@@ -68,11 +67,11 @@ inputFile = read.table(paste(dataInputDir,"Gen1000Competition_lnFreqRatios.tab",
 ancestorFile = read.table(paste(dataInputDir,"AncCompetition_lnFreqRatios.tab",sep=""),sep="\t",header=TRUE)
 reconstructedFile = read.table(paste(dataInputDir,"ReconstructedStrainCompetition_lnFreqRatios.tab",sep=""),sep="\t",header=TRUE)
 EvsWTFile = read.table(paste(dataInputDir,"E_vs_WT_Competition_lnFreqRatios.tab",sep=""),sep="\t",header=TRUE)
-
+gen1000VsEFile = read.table(paste(dataInputDir,"Gen1000vsECompetition_lnFreqRatios.txt",sep=""),sep="\t",header=TRUE)
 
 
 getFitnessData <- function(myInputFile){
-	fitnessDF = data.frame(Name = character(),Fitness = numeric(), stderror = numeric(), variance = numeric())
+	fitnessDF = data.frame(Name = character(),Fitness = numeric(), stderror = numeric(), variance = numeric(), pvalue = numeric())
 	myExperiments = as.character(unique(myInputFile$Experiment))
 	myXVals = as.character(colnames(myInputFile))[5:NCOL(myInputFile)]
 	myNumericXVals = as.numeric(gsub('t','',myXVals)) * log2(10000) #10,000 generations per growth cycle, so convert to generations
@@ -88,14 +87,22 @@ getFitnessData <- function(myInputFile){
 		#calculate Fitness for each flask
 		for (flask in reducedInputFile$Flask){
 			flaskInput = reducedInputFile[reducedInputFile$Flask == flask,]
+			if(sum(!is.na(as.numeric(flaskInput[5:NCOL(flaskInput)])))<=1){
+			  next
+			}
 			myModel = lm(as.numeric(flaskInput[5:NCOL(flaskInput)])~myNumericXVals)
 			myModelSummary = summary(myModel)
 			sEstimate = myModelSummary$coefficients[2]
 			stderrEstimate = myModelSummary$coefficients[4]
-			varianceEstimate = (stderrEstimate * sqrt(myModelSummary$df[2]+1))**2 #back calculate variance from stderr and df
+			varianceEstimate = (myModelSummary$coefficients[2,2])**2
 			experimentfitnessDF = rbind(experimentfitnessDF,data.frame(Name=as.character(flask),Fitness = sEstimate, stderror = stderrEstimate, variance = varianceEstimate))
 		}
-		
+		if(NROW(experimentfitnessDF)==0){
+		  experimentfitnessDF = rbind(experimentfitnessDF,data.frame(Name=paste(experiment,"allFlasks_averaged",sep="_"),Fitness = NA, stderror = NA, variance = NA))
+		  
+		  fitnessDF = rbind(fitnessDF,experimentfitnessDF)
+		  next
+		}
 		#calculate Fitness overall by weighted averaging flask
 		
 		estimatesToUse = experimentfitnessDF[!is.na(match(experimentfitnessDF$Name,reducedInputFile$Flask)),]
@@ -104,12 +111,11 @@ getFitnessData <- function(myInputFile){
 		newAverage = estimatesToUse$Fitness
 		newStdErr = estimatesToUse$stderror
 		if(NROW(estimatesToUse)>1){
-			#if there is missing variance data when trying to average, set the variance to the average of the other variances (e.g. if there are only 2 valid timepoints of data for that replicate)
+			#if there is missing variance data when trying to average, set the variance to the average of the other variances
 			estimatesToUse$variance[is.na(estimatesToUse$variance)] = mean(estimatesToUse$variance,na.rm=TRUE)
-			weightedAvg = varWeightedAverage(estimatesToUse$Fitness, estimatesToUse$variance)
-			newVariance = weightedAvg[2]
-			newAverage = weightedAvg[1]
-			newStdErr = sqrt(newVariance) / sqrt(NROW(estimatesToUse)-1)
+			newVariance = 1 / sum(1/estimatesToUse$variance)
+			newAverage = sum(estimatesToUse$Fitness / estimatesToUse$variance) * newVariance
+			newStdErr = sqrt(newVariance) / sqrt(NROW(estimatesToUse))
 		}
 		experimentfitnessDF = rbind(experimentfitnessDF,data.frame(Name=paste(experiment,"allFlasks_averaged",sep="_"),Fitness = newAverage, stderror = newStdErr, variance = newVariance))
 
@@ -119,23 +125,26 @@ getFitnessData <- function(myInputFile){
 }
 
 fitnessDF = getFitnessData(inputFile)
-write.table(fitnessDF,file=paste(outputDir,"rawFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE)
+write.table(fitnessDF,file=paste(outputDir,"rawFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S2
 
 ancFitnessDF = getFitnessData(ancestorFile)
 
 #The expected fitness value of competition between two E strains is 0. The observed fitness is used to calculate variance of the fitness estimation
+myRows = which(ancFitnessDF$Name %in% ancestorFile$Flask[ancestorFile$Experiment=="E vs E"])
 ancFitnessDF$Fitness[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=0
-ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=mean((ancFitnessDF$Fitness[1:4])^2)
-ancFitnessDF$stderror[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=sqrt(mean((ancFitnessDF$Fitness[1:4])^2))
+ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=mean((ancFitnessDF$Fitness[myRows])^2)
+ancFitnessDF$stderror[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=sqrt(ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]/NROW(myRows))
 
-write.table(ancFitnessDF,file=paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE)
+write.table(ancFitnessDF,file=paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Table 1 / Dataset S1
 
 reconstructedFitnessDF = getFitnessData(reconstructedFile)
-write.table(reconstructedFitnessDF,file=paste(outputDir,"reconstructedFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE)
+write.table(reconstructedFitnessDF,file=paste(outputDir,"reconstructedFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S5
 
 EvsWTFitnessDF = getFitnessData(EvsWTFile)
-write.table(EvsWTFitnessDF,file=paste(outputDir,"EvsWTFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE)
+write.table(EvsWTFitnessDF,file=paste(outputDir,"EvsWTFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S6
 
+gen1000vsEDF = getFitnessData(gen1000VsEFile)
+write.table(gen1000vsEDF,file=paste(outputDir,"gen1000vsEFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S3
 
 
 
@@ -146,9 +155,17 @@ write.table(EvsWTFitnessDF,file=paste(outputDir,"EvsWTFitnessData.tab",sep=""),s
 ###############################
 
 timecourseDataDir <-paste(dataInputDir,"annotated_timecourse_files/",sep="")
-thr_cnt = 10
-thr_fixfreq = 0.95
-thr_detectfreq = 0.1
+
+mergedFile = c() 
+for(founderStrain in sourceOrganismsOrdered){
+  for(cultureNumber in 1:6)  {
+    myPop = paste(founderStrain,cultureNumber,sep="_")
+    infile<-scan(paste0(timecourseDataDir,myPop,"_merged_timecourse_annovar_withAnnotations.txt"),what="",sep="\n")
+    infile2 <- paste(myPop,",\t",infile,sep="")
+    mergedFile = c(mergedFile, infile2)
+  }
+}
+write.table(mergedFile,file=paste0(dataInputDir,"allTimecourseFilesMerged.txt"),sep="",quote=FALSE,row.names=FALSE,col.names=FALSE)
 
 initialTimecourseDataProcessing <- function(outputFileName){
   numRows = 10000
@@ -194,7 +211,7 @@ initialTimecourseDataProcessing <- function(outputFileName){
         if(myReadFreqs[1]>0 & sum(testVals,na.rm=TRUE) < sum(!is.na(testVals)) ){ #mutations present in the beginning should fix or be lost by gen 900 / 1000, remove if this is not the case
           next
         }
-        if(sum(myReadCounts > 0 ) <=1){ #skip mutation if it is only present in one timepoint
+        if(sum(myReadCounts[1:(myNumTimepoints-1)] > 0 & myReadCounts[2:myNumTimepoints] > 0) ==0){ #skip mutation if it is only present in one timepoint
           next
         }
         
@@ -215,8 +232,7 @@ initialTimecourseDataProcessing <- function(outputFileName){
             curMutPos = curMutPos + 1185
           }
           if(curMutPos>3470744 & founderStrain == "P"){ # The pseudomonas tufA is 9bp longer than every other tufA due to a 3AA insertion around AA 195. 
-            print("here!")
-            curMutPos = curMutPos - 9
+            curMutPos = curMutPos + 9
           }
           mutPos[curMutID] = curMutPos
           curMutID = curMutID + 1
@@ -258,15 +274,9 @@ initialTimecourseDataProcessing <- function(outputFileName){
   founderMuts[which(apply(readFreqs[,1,31:36],1,function(x) sum(x,na.rm=TRUE)/6) > thr_fixfreq)]=TRUE
   founderMuts = founderMuts & ! ancMuts
   
-  print("Number of ancestral muts")
-  print(sum(ancMuts))
-  print("Number of founder-specific muts")
-  print(sum(founderMuts))
   #mutations that are present at any frequency at t100 in 10+ populations are likely mapping artifacts
-  badMuts = apply(readFreqs[,2,],1,function(x) sum(x>0,na.rm=TRUE)) > 11
-  print("Number of muts present at any freq at t100 in 11+ populations")
-  print(sum(badMuts))
-  
+  badMuts = apply(readFreqs[,2,],1,function(x) sum(x>0,na.rm=TRUE)) > 10
+ 
   goodMuts = array(FALSE,c(numRows,numPops)) #check to make sure a mutation is present at some minimum frequency in at least one timepoint and detected in at least 2 consecutive timepoints, otherwise it is likely an artifact
   checkFreqTraj <- function(x){ 
     t2 = sum(myReadCounts[1:(myNumTimepoints-1)] > 0 & myReadCounts[2:myNumTimepoints] > 0, na.rm=TRUE) >0 #check if mutation is present in at least 2 consecutive timepoints
@@ -350,7 +360,7 @@ initialTimecourseDataProcessing <- function(outputFileName){
       if(grepl("upstream", annoSplit[1])){ 
         upGeneStr = locusSplit[locationSplit=="upstream"]
         myUpstreamGene = gsub(".*_","",upGeneStr)
-        myGene = myUpstreamGene #annotate gene as upstream gene, even if downstream gene exists, since it is more likely to regulate the gene it is upstream of
+        myGene = myUpstreamGene #annotate gene as upstream gene, even if downstream gene exists
       }
     }
     
@@ -406,8 +416,6 @@ initialTimecourseDataProcessing <- function(outputFileName){
   
   write.table(allMutFile,file=allMutFileName,row.names=FALSE,col.names=FALSE,quote=FALSE,sep="\t")
 }
-initialTimecourseDataProcessing()
-
 allMutFile<-read.table(allMutFileName,sep="\t",header=FALSE)
 selectedMuts = allMutFile[apply(allMutFile[,12:22],1,function(x){max(x,na.rm=TRUE)-min(x,na.rm=TRUE)>0.2}),] #selected mutations are those that changed at least 20% frequency across the experiment
 selectedMutsLowThresh = allMutFile[apply(allMutFile[,12:22],1,function(x){max(x,na.rm=TRUE)-min(x,na.rm=TRUE)>0.1}),] #to see the robustness of this cutoff, we lower it to 10%
@@ -426,13 +434,16 @@ write.table(selectedMutsLowThresh, file=lowSelectedMutFileName,sep="\t",col.name
 ###############################
 
 fitnessDF = read.table(paste(outputDir,"rawFitnessData.tab",sep=""),sep="\t",header=TRUE)
-ancFitnessDF = read.table(paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",header=TRUE) #anc fitness is calculating fitness of E strain relative to the different founders, so need to negate the fitness estimates to get founder fitness relative to E
+ancFitnessDF = read.table(paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",header=TRUE)
+gen1000vsEDF = read.table(paste(outputDir,"gen1000vsEFitnessData.tab",sep=""),sep="\t",header=TRUE)
 
 ancFitnessDFTrunc = ancFitnessDF[grep("allFlasks_averaged", ancFitnessDF$Name),]
 fitnessDFTrunc = fitnessDF[grep("allFlasks_averaged", fitnessDF$Name),]
+gen1000vsEDFTrunc = gen1000vsEDF[grep("allFlasks_averaged", gen1000vsEDF$Name),]
 
 ancGrowthRateDF = read.table(paste(dataInputDir,"AncGrowthRateEstimates.txt",sep=""),sep="\t",header=TRUE)
 ancGrowthRateDF$SEMGR = ancGrowthRateDF$Stdev.Growth.Rate/sqrt(3)
+
 
 
 #convert fitness estimates to percent per generation
@@ -444,28 +455,50 @@ fitnessDFTrunc$Fitness = fitnessDFTrunc$Fitness*100
 fitnessDFTrunc$stderror = fitnessDFTrunc$stderror*100
 fitnessDFTrunc$variance = fitnessDFTrunc$variance*100^2
 
+gen1000vsEDFTrunc$Fitness = gen1000vsEDFTrunc$Fitness*100
+gen1000vsEDFTrunc$stderror = gen1000vsEDFTrunc$stderror*100
+gen1000vsEDFTrunc$variance = gen1000vsEDFTrunc$variance*100^2
+
 
 fitnessFounderList = gsub("_.*","",fitnessDFTrunc$Name)
 fitnessFounderListFactor = factor(fitnessFounderList, levels = sourceOrganismsOrdered)
 
 ancFitnessFounderList = gsub(" .*","",ancFitnessDFTrunc$Name)
 ancFitnessFounderListFactor = factor(ancFitnessFounderList, levels = sourceOrganismsOrdered)
+
 ancFitnessDFTrunc$Founder = ancFitnessFounderList
 
-# calculate average fitness gain across all populations derived from each founder
-mydf = data.frame(species = character(), evoFitness = numeric(), evoFitnessSEM=numeric(),ancFitness=numeric(), ancFitnessSEM = numeric())
-for(organism in sourceOrganismsOrdered){
-  observedFitnessVals = fitnessDFTrunc$Fitness[fitnessFounderList == organism]
-  observedFitnessVarVals = fitnessDFTrunc$variance[fitnessFounderList == organism]
-  weightedFitnessAndVar = varWeightedAverage(observedFitnessVals,observedFitnessVarVals)
-  mydf = rbind(mydf, data.frame(species = organism, evoFitness = weightedFitnessAndVar[1],evoFitnessSEM = sqrt(weightedFitnessAndVar[2])/sqrt(sum(fitnessFounderList == organism)), ancFitness = ancFitnessDFTrunc$Fitness[ancFitnessDFTrunc$Founder==organism], ancFitnessSEM = ancFitnessDFTrunc$stderror[ancFitnessDFTrunc$Founder==organism]))
-}
-mydf$species = factor(mydf$species, levels = sourceOrganismsOrdered)
+p1<-ggplot()+
+  geom_crossbar(aes(y = fitnessDFTrunc$Fitness/2, ymin=rep(0,NROW(fitnessDFTrunc)),ymax=fitnessDFTrunc$Fitness,x=c(1:10,12:21,34:43,23:32,56:65,45:54),fill=fitnessFounderListFactor,col=fitnessFounderListFactor),width=.5)+
+  scale_fill_manual(values=speciesColors,breaks = sourceOrganismsOrdered)+
+  scale_color_manual(values=speciesColors, breaks = sourceOrganismsOrdered)+
+  geom_errorbar(aes(x=c(1:10,12:21,34:43,23:32,56:65,45:54), ymin = fitnessDFTrunc$Fitness - fitnessDFTrunc$stderror, ymax = fitnessDFTrunc$Fitness + fitnessDFTrunc$stderror),width=0)+
+  geom_hline(aes(yintercept=0),size=.5)+
+  scale_x_continuous(breaks=c(5.5,16.5,38.5,27.5,60.5,49.5),labels=sourceOrganisms)+
+  theme_bw()+
+  xlab("")+ylab("Fitness, %")+
+  theme(axis.text=element_text(size=10,color="black"),axis.title=element_text(size=14),axis.ticks.x=element_blank(),legend.position="none", panel.grid.major.x=element_blank(),panel.grid.minor.x=element_blank())
 
-p1<-ggplot(mydf)+geom_point(aes(-ancFitness,evoFitness,col=species),size=3,alpha=.7)+scale_y_continuous(breaks =c(0,10,20,30,40,50))+theme_bw()+xlab("Founder fitness, %")+ylab("Fitness gain, %")+theme(legend.title=element_blank(),legend.position="none",axis.text=element_text(colour="black"))+geom_abline(slope = -1,linetype="dashed")+scale_color_manual(values=speciesColors)+geom_text(aes(x=c(0,2,-5,-19,-34,-35),y=c(6,2,3,15,22.5,31.4),label=sourceOrganismsOrdered,col=sourceOrganismsOrdered))+geom_errorbar(aes(x=-ancFitness,ymin=evoFitness -evoFitnessSEM, ymax = evoFitness + evoFitnessSEM),width=0)+geom_errorbarh(aes(y=evoFitness,xmin=-ancFitness -ancFitnessSEM, xmax = -ancFitness + ancFitnessSEM),height=0)
 
-ggsave(p1,file=paste(outputDir,"Figure1.svg",sep=""),width=80,height=80,units="mm")
-ggsave(p1,file=paste(outputDir,"Figure1.png",sep=""),width=80,height=80,units="mm")
+p2<-ggplot()+
+  geom_crossbar(aes(y = gen1000vsEDFTrunc$Fitness/2, ymin=rep(0,NROW(gen1000vsEDFTrunc)),ymax=gen1000vsEDFTrunc$Fitness,x=c(1:10,12:21,34:43,23:32,56:65,45:54),fill=fitnessFounderListFactor,col=fitnessFounderListFactor),width=.5)+
+  scale_fill_manual(values=speciesColors,breaks = sourceOrganismsOrdered)+
+  scale_color_manual(values=speciesColors, breaks = sourceOrganismsOrdered)+
+  geom_errorbar(aes(x=c(1:10,12:21,34:43,23:32,56:65,45:54), ymin = gen1000vsEDFTrunc$Fitness - gen1000vsEDFTrunc$stderror, ymax = gen1000vsEDFTrunc$Fitness + gen1000vsEDFTrunc$stderror),width=0)+
+  geom_hline(aes(yintercept=0),size=.5)+
+  scale_x_continuous(breaks=c(5.5,16.5,38.5,27.5,60.5,49.5),labels=sourceOrganisms)+
+  theme_bw()+
+  xlab("")+ylab("Fitness relative to E, %")+
+  theme(axis.text=element_text(size=10,color="black"),axis.title=element_text(size=14),axis.ticks.x=element_blank(),legend.position="none", panel.grid.major.x=element_blank(),panel.grid.minor.x=element_blank())
+
+p3<-ggarrange(p1,p2,nrow=2)
+
+ggsave(p3,file=paste(outputDir,"Figure1.svg",sep=""),width=80,height=160, units="mm")
+ggsave(p3,file=paste(outputDir,"Figure1.png",sep=""),width=80,height=160, units="mm")
+ggsave(p3,file=paste(outputDir,"Figure1.pdf",sep=""),width=80,height=160, units="mm",device=cairo_pdf)
+
+
+
 
 
 ###
@@ -476,19 +509,13 @@ p1<-ggplot(mergedData)+geom_point(aes(x=-Fitness,y=Avg.Growth.Rate, col = founde
 
 ggsave(p1,file=paste(outputDir,"FigureS1.svg",sep=""),width=120,height=120,units="mm")
 ggsave(p1,file=paste(outputDir,"FigureS1.png",sep=""),width=120,height=120,units="mm")
-
-
-###
-p1<-ggplot()+geom_crossbar(aes(y = fitnessDFTrunc$Fitness/2, ymin=rep(0,NROW(fitnessDFTrunc)),ymax=fitnessDFTrunc$Fitness,x=c(1:10,12:21,34:43,23:32,56:65,45:54),fill=fitnessFounderListFactor,col=fitnessFounderListFactor),width=.5)+scale_fill_manual(values=speciesColors,breaks = sourceOrganismsOrdered)+scale_color_manual(values=speciesColors, breaks = sourceOrganismsOrdered)+geom_errorbar(aes(x=c(1:10,12:21,34:43,23:32,56:65,45:54), ymin = fitnessDFTrunc$Fitness - fitnessDFTrunc$stderror, ymax = fitnessDFTrunc$Fitness + fitnessDFTrunc$stderror))+geom_hline(aes(yintercept=0),size=.5)+scale_x_continuous(breaks=c(5.5,16.5,38.5,27.5,60.5,49.5),labels=sourceOrganisms)+theme_bw()+xlab("")+ylab("Fitness, %")+theme(axis.text=element_text(size=10),axis.title=element_text(size=14),axis.ticks.x=element_blank(),legend.position="none", panel.grid.major.x=element_blank(),panel.grid.minor.x=element_blank())
-
-ggsave(p1,file=paste(outputDir,"FigureS2.svg",sep=""),width=80,height=80, units="mm")
-ggsave(p1,file=paste(outputDir,"FigureS2.png",sep=""),width=80,height=80, units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS1.pdf",sep=""),width=120,height=120,units="mm",device=cairo_pdf)
 
 
 
 ###############################
 #
-# Figure 2, S3
+# Figure 2, S5, S6
 #
 ###############################
 
@@ -510,14 +537,17 @@ selectedMutsLowMultipleHits = selectedMutsLowThresh[!is.na(match(selectedMutsLow
 selectedMutsLowMultipleHits = selectedMutsLowMultipleHits[selectedMutsLowMultipleHits$V1 != "",]
 
 
-
-trajectoryPlotTableFunction <- function(selMuts){
-  myTab = selMuts[,c(1,2,11:22)]
+trajectoryPlotTableFunction <- function(selectedMuts){
+  
+  mutHitCounts = plyr::count(selectedMuts$V1)
+  selectedMutsMultipleHits = selectedMuts[!is.na(match(selectedMuts$V1,mutHitCounts$x[mutHitCounts$freq>1])),]
+  selectedMutsMultipleHits = selectedMutsMultipleHits[selectedMutsMultipleHits$V1 != "",]
+  myTab = selectedMuts[,c(1,2,11:22)]
   meltedTable = melt(myTab,id.vars=c("V1","V2","V11"))
   meltedTable <- na.omit(meltedTable)
   meltedTable$variable = (c(0:10)*100)[match(meltedTable$variable, c("V12","V13","V14","V15","V16","V17","V18","V19","V20","V21","V22"))]
   meltedTable$locusClass = "Generic"
-  meltedTable$locusClass[meltedTable$V1 %in% translationGenes] = "TM-Specific"
+  meltedTable$locusClass[meltedTable$V1 %in% translationGenes] = "TM-specific"
   meltedTable$popTitle = as.character(meltedTable$V11)
   meltedTable$popTitle =gsub("_","",meltedTable$popTitle)
   meltedTable$founder = factor(gsub("_.*","",meltedTable$V11),levels=sourceOrganismsOrdered)
@@ -527,10 +557,9 @@ trajectoryPlotTableFunction <- function(selMuts){
   return(meltedTable)
 }
 
- #divide the plot into 10 positions between 0 and 100% and order gene labels to be close to their actual trajectories without having labels overlap each other
 trajectoryPlotLabelFunction <- function(a){
   a$pasted = paste(a$V1,a$V11)
-  labelDB = data.frame(popTitle = factor(levels=levels(a$popTitle)), timepoint = numeric(), freq = numeric(), gene = character())
+  labelDB = data.frame(popTitle = factor(levels=levels(meltedTable$popTitle)), timepoint = numeric(), freq = numeric(), gene = character())
   for(x in unique(a$pasted)){
     myRow = which(a$pasted == x & a$variable == max(a$variable[a$pasted==x]))
     myFreq = a$value[myRow]
@@ -586,14 +615,15 @@ meltedTable = meltedTable[meltedTable$V11 %in% figure2PopsToUse,]
 meltedTable$popTitle = factor(meltedTable$popTitle, levels = meltedTable$popTitle[!duplicated(meltedTable$V11)][ order(meltedTable$founder[!duplicated(meltedTable$V11)], meltedTable$popNumber[!duplicated(meltedTable$V11)])])
 
 
-labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% translationGenes,])
+labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% c(translationGenes,"fimD","ftsI","hslO","amiC","trkH"),])
 
-locusColors <- c("darkgrey",brewer.pal(4,"Dark2")[c(2,1)])
-names(locusColors) <- c("Generic","TM-Specific","XXX")
+locusColors <- c("darkgrey","#D95F02",brewer.pal(12,"Paired")[2])
+names(locusColors) <- c("Generic","TM-specific","XXX")
+tufAAmpColor = brewer.pal(8,"Set2")[2]
 
 chrAmpDFLocal = chrAmpDF[chrAmpDF$popTitle %in% gsub("_","",figure2PopsToUse),]
 p1<- ggplot(meltedTable)+
-  geom_rect(data = chrAmpDFLocal, fill=brewer.pal(4,"Dark2")[2], col = brewer.pal(4,"Dark2")[2],alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
+  geom_rect(data = chrAmpDFLocal, fill=tufAAmpColor, col = tufAAmpColor,alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
   geom_line(data =meltedTable[meltedTable$locusClass == "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
   geom_line(data =meltedTable[meltedTable$locusClass != "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
   scale_color_manual(values=locusColors)+theme_classic()+
@@ -607,65 +637,97 @@ p1<- ggplot(meltedTable)+
 
 ggsave(p1,file=paste(outputDir,"Figure2.svg",sep=""),width=180,height=90, units="mm")
 ggsave(p1,file=paste(outputDir,"Figure2.png",sep=""),width=180,height=90, units="mm")
+ggsave(p1,file=paste(outputDir,"Figure2.pdf",sep=""),width=180,height=90, units="mm",device=cairo_pdf)
+
+
+
+# meltedTable = trajectoryPlotTableFunction(selectedMuts)
+# labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% translationGenes,])
+
+# p1<- ggplot(meltedTable)+
+#   geom_rect(data = chrAmpDF, fill=tufAAmpColor, col = tufAAmpColor,alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
+#   geom_line(data =meltedTable[meltedTable$locusClass == "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
+#   geom_line(data =meltedTable[meltedTable$locusClass != "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
+#   scale_color_manual(values=locusColors)+theme_classic()+
+#   theme(legend.position="none",strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
+#   xlab("Generation")+ylab("Frequency, %")+
+#   ylim(c(0,100))+xlim(c(0,1000))+
+#   geom_text(data=labelDB,aes(x=timepoint-100,y=effectivePosition*100,group=gene,label=gene,size=5),col="black")+
+#   geom_text(aes(x=30,y=90,label=popTitle,linetype=NA),col="black",size=6)+
+#   facet_wrap(popTitle~.,ncol=6)+
+#   geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")
+#ggsave(p1,file=paste(outputDir,"FigureS3.svg",sep=""),width=360,height=270, units="mm")
+#ggsave(p1,file=paste(outputDir,"FigureS3.png",sep=""),width=360,height=270, units="mm")
+#ggsave(p1,file=paste(outputDir,"FigureS3.pdf",sep=""),width=360,height=270, units="mm",device=cairo_pdf)
+
+#meltedTable = trajectoryPlotTableFunction(selectedMutsLowThresh)
+#labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% translationGenes,])
+#p1<- ggplot(meltedTable)+
+#  geom_rect(data = chrAmpDF, fill=tufAAmpColor, col = tufAAmpColor,alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
+#  geom_line(data =meltedTable[meltedTable$locusClass == "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
+#  geom_line(data =meltedTable[meltedTable$locusClass != "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
+#  scale_color_manual(values=locusColors)+theme_classic()+
+#  theme(legend.position="none",strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
+#  xlab("Generation")+ylab("Frequency, %")+
+#  ylim(c(0,100))+xlim(c(0,1000))+
+#  geom_text(data=labelDB,aes(x=timepoint-100,y=effectivePosition*100,group=gene,label=gene,size=5),col="black")+
+#  geom_text(aes(x=30,y=90,label=popTitle,linetype=NA),col="black",size=6)+
+#  facet_wrap(popTitle~.,ncol=6)+
+#  geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")
+#ggsave(p1,file=paste(outputDir,"FigureS4.svg",sep=""),width=360,height=270, units="mm")
+#ggsave(p1,file=paste(outputDir,"FigureS4.png",sep=""),width=360,height=270, units="mm")
+#ggsave(p1,file=paste(outputDir,"FigureS4.pdf",sep=""),width=360,height=270, units="mm",device=cairo_pdf)
 
 
 
 meltedTable = trajectoryPlotTableFunction(selectedMuts)
+meltedTable$locusClass[meltedTable$V1 =="trkH"]="trkH"
+meltedTable$locusClass[meltedTable$V1 =="fimD"]="fimD"
+meltedTable$locusClass <- factor(meltedTable$locusClass,levels=c("TM-specific","Generic","fimD","trkH"))
+locusColors <- c("darkgrey","#D95F02",brewer.pal(12,"Paired")[c(2,4)])
+names(locusColors) <- c("Generic","TM-specific","trkH","fimD")
+meltedTable$variable = as.numeric(meltedTable$variable)
 labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% translationGenes,])
-
 p1<- ggplot(meltedTable)+
-  geom_rect(data = chrAmpDF, fill=brewer.pal(4,"Dark2")[2], col = brewer.pal(4,"Dark2")[2],alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
+  geom_rect(data = chrAmpDF, fill=brewer.pal(4,"Dark2")[2],alpha=.4,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
   geom_line(data =meltedTable[meltedTable$locusClass == "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
   geom_line(data =meltedTable[meltedTable$locusClass != "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
-  scale_color_manual(values=locusColors)+theme_classic()+
-  theme(legend.position="none",strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
+  scale_color_manual(values=locusColors,breaks=levels(meltedTable$locusClass))+theme_classic()+
+  theme(legend.position="bottom",legend.title=element_blank(),legend.text=element_text(size=14),strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
   xlab("Generation")+ylab("Frequency, %")+
-  ylim(c(0,100))+xlim(c(0,1000))+
   geom_text(data=labelDB,aes(x=timepoint-100,y=effectivePosition*100,group=gene,label=gene,size=5),col="black")+
+  ylim(c(0,100))+xlim(c(0,1000))+
   geom_text(aes(x=30,y=90,label=popTitle,linetype=NA),col="black",size=6)+
   facet_wrap(popTitle~.,ncol=6)+
-  geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")
-ggsave(p1,file=paste(outputDir,"FigureS4.svg",sep=""),width=360,height=270, units="mm")
-ggsave(p1,file=paste(outputDir,"FigureS4.png",sep=""),width=360,height=270, units="mm")
+  geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")+
+  guides(size=FALSE)
+ggsave(p1,file=paste(outputDir,"FigureS3.svg",sep=""),width=360,height=270, units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS3.png",sep=""),width=360,height=270, units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS3.pdf",sep=""),width=360,height=270, units="mm",device=cairo_pdf)
+
 
 meltedTable = trajectoryPlotTableFunction(selectedMutsLowThresh)
+meltedTable$locusClass[meltedTable$V1 =="trkH"]="trkH"
+meltedTable$locusClass[meltedTable$V1 =="fimD"]="fimD"
+meltedTable$locusClass <- factor(meltedTable$locusClass,levels=c("TM-specific","Generic","fimD","trkH"))
+names(locusColors) <- c("Generic","TM-specific","trkH","fimD")
 labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% translationGenes,])
 p1<- ggplot(meltedTable)+
-  geom_rect(data = chrAmpDF, fill=brewer.pal(4,"Dark2")[2], col = brewer.pal(4,"Dark2")[2],alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
+  geom_rect(data = chrAmpDF, fill=brewer.pal(4,"Dark2")[2],alpha=.4,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
   geom_line(data =meltedTable[meltedTable$locusClass == "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
   geom_line(data =meltedTable[meltedTable$locusClass != "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
-  scale_color_manual(values=locusColors)+theme_classic()+
-  theme(legend.position="none",strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
+  scale_color_manual(values=locusColors,breaks=levels(meltedTable$locusClass))+theme_classic()+
+  theme(legend.position="bottom",legend.title=element_blank(),legend.text=element_text(size=14),strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
   xlab("Generation")+ylab("Frequency, %")+
   ylim(c(0,100))+xlim(c(0,1000))+
   geom_text(data=labelDB,aes(x=timepoint-100,y=effectivePosition*100,group=gene,label=gene,size=5),col="black")+
   geom_text(aes(x=30,y=90,label=popTitle,linetype=NA),col="black",size=6)+
   facet_wrap(popTitle~.,ncol=6)+
-  geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")
-ggsave(p1,file=paste(outputDir,"FigureS5.svg",sep=""),width=360,height=270, units="mm")
-ggsave(p1,file=paste(outputDir,"FigureS5.png",sep=""),width=360,height=270, units="mm")
-
-
-
-meltedTable = trajectoryPlotTableFunction(selectedMuts)
-meltedTable$locusClass[meltedTable$V1 %in% cytokinesisGenes] = "Cytokinesis"
-labelDB = trajectoryPlotLabelFunction(meltedTable[meltedTable$V1 %in% c(cytokinesisGenes),])
-myCols = locusColors
-names(myCols) <- c("Generic","TM-Specific","Cytokinesis")
-p1<- ggplot(meltedTable)+
-  geom_rect(data = chrAmpDF, fill=brewer.pal(4,"Dark2")[2], col = brewer.pal(4,"Dark2")[2],alpha=.4,linetype=0,aes(xmin = as.numeric(as.character(xmin)), xmax = as.numeric(as.character(xmax)), ymin = 0, ymax = 100))+
-  geom_line(data =meltedTable[meltedTable$locusClass == "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
-  geom_line(data =meltedTable[meltedTable$locusClass != "Generic",],aes(x=variable,y=value*100,group=V2,col=locusClass,size=.6 - 0.3*as.integer(! (V1 %in% selectedMutsMultipleHits$V1))))+
-  scale_color_manual(values=myCols)+theme_classic()+
-  theme(legend.position="none",strip.text=element_blank(),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"), axis.text=element_text(size=10,colour="black"),axis.title=element_text(size=14,colour="black"))+
-  xlab("Generation")+ylab("Frequency, %")+
-  ylim(c(0,100))+xlim(c(0,1000))+
-  geom_text(data=labelDB,aes(x=timepoint-100,y=effectivePosition*100,group=gene,label=gene,size=5),col="black")+
-  geom_text(aes(x=30,y=90,label=popTitle,linetype=NA),col="black",size=6)+
-  facet_wrap(popTitle~.,ncol=6)+
-  geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")
-ggsave(p1,file=paste(outputDir,"FigureS6.svg",sep=""),width=360,height=270, units="mm")
-ggsave(p1,file=paste(outputDir,"FigureS6.png",sep=""),width=360,height=270, units="mm")
+  geom_hline(aes(yintercept=100),col="grey")+geom_hline(aes(yintercept=0),col="grey")+
+  guides(size=FALSE)
+ggsave(p1,file=paste(outputDir,"FigureS4.svg",sep=""),width=360,height=270, units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS4.png",sep=""),width=360,height=270, units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS4.pdf",sep=""),width=360,height=270, units="mm",device=cairo_pdf)
 
 
 ###############################
@@ -679,7 +741,6 @@ allMutFile<-read.table(allMutFileName,sep="\t",header=FALSE)
 
 selectedMuts = read.table(selectedMutFileName,sep="\t",header=FALSE)
 selectedMutsLowThresh = read.table(lowSelectedMutFileName,sep="\t",header=FALSE)
-selectedMutsUltraLowThresh = read.table(ultraLowSelectedMutFileName,sep="\t",header=FALSE)
 
 #putatively adaptive mutations are those selected mutations that target a gene that was hit multiple times
 
@@ -687,111 +748,209 @@ mutHitCounts = plyr::count(selectedMuts$V1)
 selectedMutsMultipleHits = selectedMuts[!is.na(match(selectedMuts$V1,mutHitCounts$x[mutHitCounts$freq>1])),]
 selectedMutsMultipleHits = selectedMutsMultipleHits[selectedMutsMultipleHits$V1 != "",]
 
-mutHitCounts = plyr::count(selectedMutsLowThresh$V1)
-selectedMutsLowMultipleHits = selectedMutsLowThresh[!is.na(match(selectedMutsLowThresh$V1,mutHitCounts$x[mutHitCounts$freq>1])),]
-selectedMutsLowMultipleHits = selectedMutsLowMultipleHits[selectedMutsLowMultipleHits$V1 != "",]
 
-mutHitCounts = plyr::count(selectedMutsUltraLowThresh$V1)
-selectedMutsUltraLowMultipleHits = selectedMutsUltraLowThresh[!is.na(match(selectedMutsUltraLowThresh$V1,mutHitCounts$x[mutHitCounts$freq>1])),]
-selectedMutsUltraLowMultipleHits = selectedMutsUltraLowMultipleHits[selectedMutsUltraLowMultipleHits$V1 != "",]
-
-
-
-Figure3Function <- function(mutSet, geneList, listName, plotName, speciesSet){
-  mutIdentityDF = data.frame(founder = character(), gene = character(), mutationClass = character(), locusClass = character())
-  
-  
-  for(gene in unique(as.character(mutSet$V1))){
-  	mutClass = ""
-  	if(NROW(unique(populationTypes[match(gsub("_.","",mutSet$V11[mutSet$V1 == gene]),sourceOrganismsOrdered)]))==2){
-  		mutClass = "Generic"
-  	}else if(NROW(unique(gsub("_.","",mutSet$V11[mutSet$V1 == gene])))==1){
-  		mutClass = "Founder specific"
-  	}else{
-  		mutClass = "Fitness specific"
-  	}
-  	locusClass = "Generic"
-  	if(gene %in% geneList){
-  		locusClass = listName
-  	}
-  	
-  	mutIdentityDF = rbind(mutIdentityDF, data.frame(founder = gsub("_.","",mutSet$V11[mutSet$V1 == gene]),gene = gene, mutationClass = mutClass, locusClass = locusClass))
-  }
-  
-  tufAType = "Generic"
-  if("tufA" %in% geneList){
-    tufAType = listName
-  }
-  
-  mutIdentityDF = rbind(mutIdentityDF, data.frame(founder = gsub("_.","",chrAmptufAPopulations),gene = "tufA", mutationClass = "Fitness specific", locusClass = tufAType))
-  
-  mutCountDF = data.frame(founder = character(), locusClass = character(), count = numeric())
-  for(founder in sourceOrganismsOrdered){
-    for(locusClass in unique(mutIdentityDF$locusClass)){
-      myCount = sum(mutIdentityDF$founder == founder & mutIdentityDF$locusClass == locusClass,na.rm=TRUE)
-      mutCountDF = rbind(mutCountDF,data.frame(founder = founder, locusClass = locusClass, count = myCount))
-    }
-  }
-  mycols = locusColors
-  names(mycols) <- c("Generic","TM-Specific",listName)
-  if(listName == "TM-Specific"){
-    names(mycols) <- c("Generic","TM-Specific","XXX")
-  }
-  mutCountDF$founder <- factor(mutCountDF$founder, levels = sourceOrganismsOrdered)
- 
-  
-  
-  
-  myfun <- function(x){min(which(x),na.rm=TRUE)}
-  getCumDist <- function(mutDF, freqThreshold){
-    outputDF = data.frame(freqThresh = numeric(), timepoint = numeric(), numMuts = numeric())
+mutTypeCountDF = data.frame(founder = character(), geneType = character(), fixedType = character(), numMuts = numeric(), plotNumMuts = numeric())
+for(founder in sourceOrganismsOrdered){
+  numModuleFixedMuts = 0
+  numModuleNonFixedMuts = 0
+  numGenericFixedMuts = 0
+  numGenericNonFixedMuts = 0
+  for(pop in c(1:6)){
+    popid = paste(founder,pop,sep="_")
+    subTable <- selectedMutsMultipleHits[selectedMutsMultipleHits$V11 == paste(founder,pop,sep="_"),]
+    isFixed = apply(subTable,1,function(x) sum(x[c(12:22)]>0.95,na.rm=TRUE)>0)
     
-    firstGenOverThreshAll = (as.numeric(apply(mutDF[,12:22]>freqThreshold,1, myfun))-1)*100
-    myCounts = plyr::count(firstGenOverThreshAll[!is.na(firstGenOverThreshAll)])
-    validTimes = c(0:10)*100
-    numCounts = rep(0,11)
-    for(i in myCounts$x){
-      numCounts[validTimes == i] = myCounts$freq[myCounts$x == i]
-    }
-    outputDF = rbind(outputDF, data.frame(freqThresh = freqThreshold, timepoint = validTimes, numMuts = cumsum(numCounts)))
-    
-    return(outputDF)
+    numModuleFixedMuts = numModuleFixedMuts + sum(subTable$V1[isFixed] %in% translationGenes )
+    numGenericFixedMuts = numGenericFixedMuts + sum(! subTable$V1[isFixed] %in% translationGenes )
+    numModuleNonFixedMuts = numModuleNonFixedMuts + sum(subTable$V1[!isFixed] %in% translationGenes )
+    numGenericNonFixedMuts = numGenericNonFixedMuts + sum(!subTable$V1[!isFixed] %in% translationGenes )
   }
+  mutTypeCountDF = rbind(mutTypeCountDF, data.frame(founder = founder, geneType = rep(c("TM-specific","Generic"),2),fixedType = rep(c("Non-fixed","Fixed"),each=2), numMuts = c(numModuleNonFixedMuts,numGenericNonFixedMuts,numModuleFixedMuts,numGenericFixedMuts), plotNumMuts = c(numModuleFixedMuts + numModuleNonFixedMuts, numGenericFixedMuts + numGenericNonFixedMuts, numModuleFixedMuts, numGenericFixedMuts)))
+}
+alpha = c(.5,1)
+mutTypeCountDF$fixedType <- factor(mutTypeCountDF$fixedType, levels = c("Non-fixed","Fixed"))
+mutTypeCountDF$categoryName = paste(mutTypeCountDF$geneType,mutTypeCountDF$fixedType,sep="\n")
+
+locusColors <- c("#8F8F8F","#D6D6D6","#D95F02","#F0BF9A")
+names(locusColors) <- c("Generic\nFixed","Generic\nNon-fixed","TM-specific\nFixed","TM-specific\nNon-fixed")
+# p1<-ggplot(mutTypeCountDF)+
+#   geom_bar(aes(x=founder,y=plotNumMuts/6,group=geneType,fill=categoryName),col="black",stat="identity",position="dodge")+
+#   theme_bw()+
+#   xlab("Founder")+ylab("Mutations per population")+
+#   scale_fill_manual(values=locusColors)+
+#   theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10,color="black"),axis.title=element_text(size=12),legend.text=element_text(size=10),panel.grid.major.x = element_blank())+
+#   annotate(geom = 'text', label = 'A', x = -Inf, y = Inf, hjust = -.5, vjust = 1.2,size=6,fontface="bold")+
+#   guides(fill=guide_legend(nrow=2,byrow=TRUE))
+# 
+# 
+
+
+myfun <- function(x){min(which(x),na.rm=TRUE)}
+getCumDist <- function(mutDF, freqThreshold){
+  outputDF = data.frame(freqThresh = numeric(), timepoint = numeric(), numMuts = numeric())
   
-  outputDF = getCumDist(mutSet[mutSet$V1 %in% geneList & gsub("_.","",mutSet$V11) %in% speciesSet,],0.95)
-  outputDF$Type = listName
-  outputDF2 = getCumDist(mutSet[! mutSet$V1 %in% geneList & gsub("_.","",mutSet$V11) %in% speciesSet,],0.95)
-  outputDF2$Type = "Generic"
-  merged = rbind(outputDF,outputDF2)
+  firstGenOverThreshAll = (as.numeric(apply(mutDF[,12:22]>freqThreshold,1, myfun))-1)*100
+  myCounts = plyr::count(firstGenOverThreshAll[!is.na(firstGenOverThreshAll)])
+  validTimes = c(0:10)*100
+  numCounts = rep(0,11)
+  for(i in myCounts$x){
+    numCounts[validTimes == i] = myCounts$freq[myCounts$x == i]
+  }
+  outputDF = rbind(outputDF, data.frame(freqThresh = freqThreshold, timepoint = validTimes, numMuts = cumsum(numCounts), deltaNumMuts = numCounts))
   
-  p1<-ggplot(mutCountDF)+
-    geom_bar(aes(x=founder,y=count/6,group=paste(founder,locusClass),fill=locusClass),stat="identity",position="stack")+
-    theme_bw()+
-    scale_fill_manual(values = mycols)+
-    xlab("Founder")+ylab("Detected mutations per population")+
-    theme(legend.title=element_blank(),legend.text=element_text(size=10),legend.position="bottom",axis.text=element_text(size=10),axis.title=element_text(size=12),panel.grid.major.x = element_blank())+
-    annotate(geom = 'text', label = 'A', x = -Inf, y = Inf, hjust = -.5, vjust = 1.2,size=6,fontface="bold")
-  
-  p2<-ggplot(merged)+geom_line(aes(x=timepoint,y=numMuts/18,group=Type,col=Type),size=2)+
-    scale_color_manual(values=mycols)+
-    theme_bw()+
-    xlab("Generation")+ylab("Fixed mutations per population")+
-    theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10),axis.title=element_text(size=12),legend.text=element_text(size=10))+
-    annotate(geom = 'text', label = 'B', x = -Inf, y = Inf, hjust = -.5, vjust = 1.2,size=6,fontface="bold")
-  
-  p3 = arrangeGrob(p1, p2, nrow = 1)
-  ggsave(p3,file=paste(outputDir,plotName,".svg",sep=""),width=160,height=100, units="mm")
-  ggsave(p3,file=paste(outputDir,plotName,".png",sep=""),width=160,height=100, units="mm")
+  return(outputDF)
 }
 
-Figure3Function(selectedMutsMultipleHits, translationGenes, "TM-Specific","Figure3",c("V","P","A"))
-Figure3Function(selectedMutsMultipleHits, cytokinesisGenes, "Cytokinesis","FigureS7",sourceOrganisms)
 
-reconstructedFitnessDF = read.table(paste(outputDir,"reconstructedFitnessData.tab",sep=""),sep="\t",header=TRUE)
-reconstructedFitnessDF$Fitness = reconstructedFitnessDF$Fitness*100
-reconstructedFitnessDF$stderror = reconstructedFitnessDF$stderror*100
-reconstructedFitnessDF$variance = reconstructedFitnessDF$variance*100^2
-reconstructedFitnessDFTrunc = reconstructedFitnessDF[grep("allFlasks_averaged", reconstructedFitnessDF$Name),]
+mycols = c("#8F8F8F","#D95F02")
+names(mycols) <- c("Generic","TM-specific")
+geneGroups = {}
+geneGroups["TM-specific"]=list(translationGenes)
+geneGroups["Generic"]=list(setdiff(unique(selectedMutsMultipleHits$V1),c(translationGenes)))
+founders = c("V","A","P")
+
+timingDFFixed_VAP<-data.frame()
+  for(gg in names(geneGroups)){
+    myMutSet = selectedMutsMultipleHits[selectedMutsMultipleHits$V1 %in% geneGroups[[gg]] & gsub("_.","",selectedMutsMultipleHits$V11) %in% founders,]
+    outputDF<-getCumDist(myMutSet,0.95)
+    outputDF$numPopulations = NROW(founders)*6
+    outputDF$Type = gg
+    timingDFFixed_VAP<-rbind(timingDFFixed_VAP,outputDF)
+}
+
+
+
+timingDFFixed_VAP$Type <- factor(timingDFFixed_VAP$Type,levels=names(geneGroups))
+
+
+
+# p2<-ggplot(timingDFFixed_VAP)+geom_line(aes(x=timepoint,y=numMuts/numPopulations,group=Type,col=Type),size=2)+
+#   scale_color_manual(values=mycols)+
+#   theme_bw()+
+#   xlab("Generation")+ylab("Fixed mutations per population")+
+#   theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10),axis.title=element_text(size=12),legend.text=element_text(size=10),strip.text=element_blank())+
+#   annotate(geom = 'text', label = 'B', x = -Inf, y = Inf, hjust = -.5, vjust = 1.2,size=6,fontface="bold")
+# 
+# p3<-ggarrange(p1,p2,nrow=1)
+# ggsave(p3,file=paste(outputDir,"Figure3.svg",sep=""),width=180,height=120, units="mm")
+# ggsave(p3,file=paste(outputDir,"Figure3.png",sep=""),width=180,height=120, units="mm")
+
+
+p6<-ggplot(mutTypeCountDF)+
+  geom_bar(aes(x=founder,y=plotNumMuts/6,group=geneType,fill=categoryName),col="black",stat="identity",position="dodge")+
+  theme_bw()+
+  xlab("Founder")+ylab("Mutations per population")+
+  scale_fill_manual(values=locusColors)+
+  theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10,color="black"),axis.title=element_text(size=12),legend.text=element_text(size=10),panel.grid.major.x = element_blank())+
+  guides(fill=guide_legend(nrow=2,byrow=TRUE))
+
+
+p7<-ggplot(timingDFFixed_VAP)+geom_line(aes(x=timepoint,y=numMuts/numPopulations,group=Type,col=Type),size=2)+
+  scale_color_manual(values=mycols)+
+  theme_bw()+
+  xlab("Generation")+ylab("Fixed mutations per population")+
+  theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10,color="black"),axis.title=element_text(size=12),legend.text=element_text(size=10),strip.text=element_blank())
+
+
+p8 <- ggplot(timingDFFreq[! timingDFFixed$Type %in% c("trkH","fimD"),])+geom_line(aes(x=timepoint,y=freq/numPopulations, col = Type,size=Type))+
+  scale_size_manual(values=lineSizes)+
+  scale_color_manual(values=mycols)+
+  theme_bw()+
+  xlab("Generation")+ylab("Average total allele frequency")+
+  theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10,color="black"),axis.title=element_text(size=12),legend.text=element_text(size=10),strip.text=element_blank())+facet_wrap(. ~ speciesSet,nrow=3,dir="v")+geom_text(aes(x=500,y=2.65,label=speciesSet),size=4)
+
+p9<-arrangeGrob(arrangeGrob(p6,p7,nrow=2),p8,ncol=2,widths=c(.4,.6))
+ggsave(p9,file=paste(outputDir,"Figure3.pdf",sep=""),width=240,height=180,units="mm",device=cairo_pdf)
+
+
+
+
+mycols = c("#8F8F8F","#D95F02","#1B9E77","#7570B3")
+names(mycols) <- c("Generic","TM-specific","fimD","trkH")
+
+geneGroups = {}
+geneGroups["TM-specific"]=list(translationGenes)
+geneGroups["Generic"]=list(setdiff(unique(selectedMutsMultipleHits$V1),c(translationGenes)))
+geneGroups["trkH"]=list(c("trkH"))
+geneGroups["fimD"]=list(c("fimD"))
+
+
+lineSizes = {}
+lineSizes["TM-specific"]=2
+lineSizes["Generic"]=2
+lineSizes["trkH"]=1
+lineSizes["fimD"]=1
+
+founderGroups = {}
+founderGroups["E"] = list(c("E"))
+founderGroups["S"] = list(c("S"))
+founderGroups["Y"] = list(c("Y"))
+founderGroups["V"] = list(c("V"))
+founderGroups["A"] = list(c("A"))
+founderGroups["P"] = list(c("P"))
+
+
+
+timingDFFixed<-data.frame()
+timingDFEstablished<-data.frame()
+timingDFFreq<-data.frame(timepoint=numeric(),freq=numeric(),Type=character(),speciesSet=character())
+for(fg in names(founderGroups)){
+  for(gg in names(geneGroups)){
+    myMutSet = selectedMutsMultipleHits[selectedMutsMultipleHits$V1 %in% geneGroups[[gg]] & gsub("_.","",selectedMutsMultipleHits$V11) %in% founderGroups[[fg]],]
+    if(NROW(myMutSet)>0){
+      outputDF<-getCumDist(myMutSet,0.95)
+      outputDF$numPopulations = NROW(founderGroups[[fg]])*6
+      outputDF$Type = gg
+      outputDF$speciesSet = fg
+      timingDFFixed<-rbind(timingDFFixed,outputDF)
+      
+      outputDF<-getCumDist(myMutSet,0.1)
+      outputDF$numPopulations = NROW(founderGroups[[fg]])*6
+      outputDF$Type = gg
+      outputDF$speciesSet = fg
+      timingDFEstablished<-rbind(timingDFEstablished,outputDF)
+      
+      timingDFFreq<-rbind(timingDFFreq,data.frame(timepoint=seq(0,1000,100),freq=as.numeric(colSums(myMutSet[,c(12:22)],na.rm=TRUE)),Type=gg,speciesSet=fg, numPopulations = NROW(founderGroups[[fg]])*6))
+    }
+  }
+}
+
+timingDFFixed$speciesSet <- factor(timingDFFixed$speciesSet,levels=names(founderGroups))
+timingDFEstablished$speciesSet <- factor(timingDFEstablished$speciesSet,levels=names(founderGroups))
+timingDFFreq$speciesSet <- factor(timingDFFreq$speciesSet,levels=names(founderGroups))
+
+timingDFFixed$Type <- factor(timingDFFixed$Type,levels=names(geneGroups))
+timingDFEstablished$Type <- factor(timingDFEstablished$Type,levels=names(geneGroups))
+timingDFFreq$Type <- factor(timingDFFreq$Type,levels=names(geneGroups))
+
+
+
+p4<-ggplot(timingDFFixed)+geom_line(aes(x=timepoint,y=numMuts/numPopulations,group=paste(Type,speciesSet),col=Type, size = Type))+
+  scale_size_manual(values=lineSizes)+
+  scale_color_manual(values=mycols)+
+  theme_bw()+
+  xlab("Generation")+ylab("Fixed mutations per population")+
+  theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10),axis.title=element_text(size=12),legend.text=element_text(size=10),strip.text=element_blank())+facet_wrap(. ~ speciesSet)+geom_text(aes(x=50,y=2.1,label=speciesSet),size=6)
+
+ggsave(p4,file=paste(outputDir,"FigureS5.svg",sep=""),width=180,height=120, units="mm")
+ggsave(p4,file=paste(outputDir,"FigureS5.png",sep=""),width=180,height=120, units="mm")
+ggsave(p4,file=paste(outputDir,"FigureS5.pdf",sep=""),width=180,height=120, units="mm",device=cairo_pdf)
+
+
+
+p5 <- ggplot(timingDFFreq)+geom_line(aes(x=timepoint,y=freq/numPopulations, col = Type,size=Type))+
+  scale_size_manual(values=lineSizes)+
+  scale_color_manual(values=mycols)+
+  theme_bw()+
+  xlab("Generation")+ylab("Average total allele frequency")+
+  theme(legend.title=element_blank(),legend.position="bottom",axis.text=element_text(size=10),axis.title=element_text(size=12),legend.text=element_text(size=10),strip.text=element_blank())+facet_wrap(. ~ speciesSet)+geom_text(aes(x=50,y=2.5,label=speciesSet),size=6)
+
+ggsave(p5,file=paste(outputDir,"FigureS6.svg",sep=""),width=180,height=120, units="mm")
+ggsave(p5,file=paste(outputDir,"FigureS6.png",sep=""),width=180,height=120, units="mm")
+ggsave(p5,file=paste(outputDir,"FigureS6.pdf",sep=""),width=180,height=120, units="mm",device=cairo_pdf)
+
+
+
 
 
 ###############################
@@ -808,7 +967,7 @@ mutHitCounts = plyr::count(selectedMuts$V1)
 selectedMutsMultipleHits = selectedMuts[!is.na(match(selectedMuts$V1,mutHitCounts$x[mutHitCounts$freq>1])),]
 selectedMutsMultipleHits = selectedMutsMultipleHits[selectedMutsMultipleHits$V1 != "",]
 
-mutIdentityDF = data.frame(founder = character(), gene = character(), mutationClass = character(), locusClass = character())
+mutIdentityDF = data.frame(founder = character(), population = character(), gene = character(), mutationClass = character(), locusClass = character())
 
 
 for(gene in unique(as.character(selectedMutsMultipleHits$V1))){
@@ -822,12 +981,12 @@ for(gene in unique(as.character(selectedMutsMultipleHits$V1))){
   }
   locusClass = "Generic"
   if(gene %in% translationGenes){
-    locusClass = "TM-Specific"
+    locusClass = "TM-specific"
   }
   
-  mutIdentityDF = rbind(mutIdentityDF, data.frame(founder = gsub("_.","",selectedMutsMultipleHits$V11[selectedMutsMultipleHits$V1 == gene]),gene = gene, mutationClass = mutClass, locusClass = locusClass))
+  mutIdentityDF = rbind(mutIdentityDF, data.frame(founder = gsub("_.","",selectedMutsMultipleHits$V11[selectedMutsMultipleHits$V1 == gene]),population = selectedMutsMultipleHits$V11[selectedMutsMultipleHits$V1 == gene],gene = gene, mutationClass = mutClass, locusClass = locusClass))
 }
-mutIdentityDF = rbind(mutIdentityDF, data.frame(founder = gsub("_.","",chrAmptufAPopulations),gene = "tufA amp", mutationClass = "Fitness specific", locusClass = "TM-Specific"))
+mutIdentityDF = rbind(mutIdentityDF, data.frame(founder = gsub("_.","",chrAmptufAPopulations),population = chrAmptufAPopulations, gene = "tufA amp", mutationClass = "Fitness specific", locusClass = "TM-specific"))
 
 mutCountDF = data.frame(founder = character(), locusClass = character(), count = numeric())
 for(founder in sourceOrganismsOrdered){
@@ -885,17 +1044,17 @@ meltedDF2TM$gene = newGeneList[match(meltedDF2TM$gene,origGeneList)]
 meltedDF2TM$gene = factor(meltedDF2TM$gene,levels=rev(newGeneList[reordering]))
 
 geneType = rep("Generic",NROW(castedDF2))
-geneType[castedDF2$gene[order(secondSort,thirdSort, decreasing=TRUE)] %in% c(translationGenes,"tufA amp")] = "TM-Specific"
+geneType[castedDF2$gene[order(secondSort,thirdSort, decreasing=TRUE)] %in% c(translationGenes,"tufA amp")] = "TM-specific"
 
 meltedDF2TM$geneType = geneType[match(meltedDF2TM$gene,newGeneList[reordering])]
 meltedDF2TM$variable <- factor(as.character(meltedDF2TM$variable),rev(sourceOrganismsOrdered))
 
 geneFaceTM = rep("plain",NROW(geneLevels))
 geneFaceTM[geneLevels %in% as.character(geneEntropyDFTM$gene[as.numeric(as.character(geneEntropyDFTM$bhP)) < pvalueThreshold])]= "bold"
-meltedDF2TM = rbind(meltedDF2TM, data.frame(gene = rep(unique(meltedDF2TM$gene),3), variable = factor(rep(c("E","S","Y"),each=NROW(unique(meltedDF2TM$gene))),rev(sourceOrganismsOrdered)),value = 0, geneType = "TM-Specific" ))
+meltedDF2TM = rbind(meltedDF2TM, data.frame(gene = rep(unique(meltedDF2TM$gene),3), variable = factor(rep(c("E","S","Y"),each=NROW(unique(meltedDF2TM$gene))),rev(sourceOrganismsOrdered)),value = 0, geneType = "TM-specific" ))
 p1<-ggplot(meltedDF2TM)+geom_tile(aes(gene, variable,fill=value),color="white") +
   scale_fill_gradientn(colors = c("white","grey20"),breaks=c(7:1),guide="legend",limits = c(0,7))+theme_bw()+
-  ggtitle("TM-Specific")+ylab("Founder")+
+  ggtitle("TM-specific")+ylab("Founder")+
   theme(axis.title.x=element_blank(),legend.title=element_blank(),legend.text=element_text(size=10),axis.text=element_text(size=10), axis.text.x=element_text(angle=60,hjust=1,face=rev(geneFaceTM)),plot.title=element_text(size=14,hjust = .5), legend.position="none")+
   geom_text(aes(x=2,y=6,label="A"),size=10,fontface="bold")
 
@@ -947,7 +1106,7 @@ meltedDF2Generic$gene = newGeneList[match(meltedDF2Generic$gene,origGeneList)]
 meltedDF2Generic$gene = factor(meltedDF2Generic$gene,levels=rev(newGeneList[reordering]))
 
 geneType = rep("Generic",NROW(castedDF2))
-geneType[castedDF2$gene[order(secondSort,thirdSort, decreasing=TRUE)] %in% c(translationGenes,"tufA amp")] = "TM-Specific"
+geneType[castedDF2$gene[order(secondSort,thirdSort, decreasing=TRUE)] %in% c(translationGenes,"tufA amp")] = "TM-specific"
 
 meltedDF2Generic$geneType = geneType[match(meltedDF2Generic$gene,newGeneList[reordering])]
 meltedDF2Generic$variable <- factor(as.character(meltedDF2Generic$variable),rev(sourceOrganismsOrdered))
@@ -966,11 +1125,56 @@ p3<- ggarrange(p1,p2,widths=c(.65,2))
 
 ggsave(p3,file=paste(outputDir,"Figure4.svg",sep=""),width=180,height=100, units="mm")
 ggsave(p3,file=paste(outputDir,"Figure4.png",sep=""),width=180,height=100, units="mm")
+ggsave(p3,file=paste(outputDir,"Figure4.pdf",sep=""),width=180,height=100, units="mm",device=cairo_pdf)
+
+
+
+
+print("TM-specific randomizations")
+print(geneEntropyDF)
+
+
 
 
 ###############################
 #
-# Figure 5
+# Figure S2 - coverage plots
+#
+###############################
+coveragePlotDF = data.frame(sample = character(), position = numeric(), coverage = numeric())
+for(i in sourceOrganismsOrdered){
+  for(j in c(1:6)){
+    for(k in c(0:10)*100){
+      
+      filename = paste(dataInputDir,"coverage_data/",i,"_",j,"_",k,"_averageGenomeCov.tab",sep="")
+      #if(file.exists(filename) & !file.exists(paste(outputDir,"coverage_plots/",i,"_",j,"_",k,"_covPlot.png",sep=""))){
+      if(file.exists(filename)){
+        myDF = read.table(filename, sep="\t")
+        myDF=myDF[,c(2:3)]
+        names(myDF) <- c("position","coverage")
+        myDF$sample = paste(i,"_",j,"_",k,sep="")
+        coveragePlotDF = rbind(coveragePlotDF,myDF)
+        #p1<-ggplot(myDF)+geom_point(aes(x=x,y=y)) + theme_bw()+xlab("Genomic Coordinate")+ylab("1kb average coverage")+ geom_vline(xintercept=c(3420000,3520000), color = "red", linetype="longdash")+ggtitle(paste(i,'-',j,', t',k,sep=""))+theme(axis.title=element_text(size=16),axis.text=element_text(size=12),plot.title=element_text(size=20))
+        #ggsave(p1,file=paste(outputDir,"coverage_plots/",i,"_",j,"_",k,"_covPlot.png",sep=""),width=120,height=80,units="mm")
+      }
+    }
+  }
+}
+
+#plots to include
+plotsToUse = c("V_1_100", "V_3_700", "V_5_600", "A_1_100", "A_2_600", "A_3_100", "A_4_700", "A_5_100", "A_6_100", "P_4_100", "P_6_200")
+coveragePlotDFTrunc = coveragePlotDF[coveragePlotDF$sample %in% plotsToUse,]
+
+p1<-ggplot(coveragePlotDFTrunc)+geom_point(aes(x=position,y=coverage)) + theme_bw()+xlab("Genomic Coordinate")+ylab("1kb average coverage")+ geom_vline(xintercept=c(3420000,3520000), color = "red", linetype="longdash")+theme(axis.title=element_text(size=16),axis.text=element_text(size=12,colour="black"),plot.title=element_text(size=20),strip.text=element_text(size=20),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"))+facet_wrap(sample~.,ncol=3,scales="free_y")
+
+ggsave(p1,file=paste(outputDir,"FigureS2.png",sep=""),width=120*3,height=80*4,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS2.svg",sep=""),width=120*3,height=80*4,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS2.pdf",sep=""),width=120*3,height=80*4,units="mm",device = cairo_pdf)
+
+
+###############################
+#
+# Figure S7
 #
 ###############################
 reconstructedFitnessDF = read.table(paste(outputDir,"reconstructedFitnessData.tab",sep=""),sep="\t",header=TRUE)
@@ -989,47 +1193,14 @@ myNamesFactor = factor(myNames, levels = myNames)
 myBKs = gsub(" .*","",reconstructedFitnessDFTrunc2$Name[grep("allFlasks_averaged", reconstructedFitnessDFTrunc2$Name)])
 myBKsFactor = factor(myBKs, levels = sourceOrganismsOrdered)
 p1<-ggplot(reconstructedFitnessDFTrunc2)+geom_bar(aes(x=myBKsFactor,y=Fitness, fill = myBKsFactor),stat="identity",position="dodge")+xlab("Founder")+ylab("Fitness, %")+scale_fill_manual(values=speciesColors,breaks = sourceOrganismsOrdered)+geom_errorbar(aes(x=myBKsFactor, ymin = Fitness - stderror, ymax = Fitness + stderror),width=.2)+theme_bw()+theme(axis.text=element_text(size=16),axis.title=element_text(size=20),legend.title=element_blank(),legend.position="none")
-ggsave(p1,file=paste(outputDir,"Figure5.svg",sep=""),width=140,height=140,units="mm")
-ggsave(p1,file=paste(outputDir,"Figure5.png",sep=""),width=140,height=140,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS7.svg",sep=""),width=140,height=140,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS7.png",sep=""),width=140,height=140,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS7.pdf",sep=""),width=140,height=140,units="mm",device=cairo_pdf)
 
 
 ###############################
 #
-# Figure S3 - coverage plots
-#
-###############################
-coveragePlotDF = data.frame(sample = character(), position = numeric(), coverage = numeric())
-for(i in sourceOrganismsOrdered){
-  for(j in c(1:6)){
-    for(k in c(0:10)*100){
-      
-      filename = paste(dataInputDir,"coverage_data/",i,"_",j,"_",k,"_averageGenomeCov.tab",sep="")
-      #if(file.exists(filename) & !file.exists(paste(outputDir,"coverage_plots/",i,"_",j,"_",k,"_covPlot.png",sep=""))){
-      if(file.exists(filename)){
-        myDF = read.table(filename, sep="\t")
-        myDF=myDF[,c(2:3)]
-        names(myDF) <- c("position","coverage")
-        myDF$sample = paste(i,j,", t",k,sep="")
-        coveragePlotDF = rbind(coveragePlotDF,myDF)
-        #p1<-ggplot(myDF)+geom_point(aes(x=x,y=y)) + theme_bw()+xlab("Genomic Coordinate")+ylab("1kb average coverage")+ geom_vline(xintercept=c(3420000,3520000), color = "red", linetype="longdash")+ggtitle(paste(i,'-',j,', t',k,sep=""))+theme(axis.title=element_text(size=16),axis.text=element_text(size=12),plot.title=element_text(size=20))
-        #ggsave(p1,file=paste(outputDir,"coverage_plots/",i,"_",j,"_",k,"_covPlot.png",sep=""),width=120,height=80,units="mm")
-      }
-    }
-  }
-}
-
-#plots to include
-plotsToUse = c("V1, t100", "V3, t700", "V5, t600", "A1, t100", "A2, t600", "A3, t100", "A4, t700", "A5, t100", "A6, t100", "P4, t100", "P6, t200")
-coveragePlotDFTrunc = coveragePlotDF[coveragePlotDF$sample %in% plotsToUse,]
-
-p1<-ggplot(coveragePlotDFTrunc)+geom_point(aes(x=position,y=coverage)) + theme_bw()+xlab("Genomic Coordinate")+ylab("1kb average coverage")+ geom_vline(xintercept=c(3420000,3520000), color = "red", linetype="longdash")+theme(axis.title=element_text(size=16),axis.text=element_text(size=12,colour="black"),plot.title=element_text(size=20),strip.text=element_text(size=20),strip.background=element_blank(),panel.border = element_rect(fill=NA,colour = "black"))+facet_wrap(sample~.,ncol=3,scales="free_y")
-
-ggsave(p1,file=paste(outputDir,"FigureS3.png",sep=""),width=120*3,height=80*4,units="mm")
-ggsave(p1,file=paste(outputDir,"FigureS3.svg",sep=""),width=120*3,height=80*4,units="mm")
-
-###############################
-#
-# Figure S8
+# Figure S9
 #
 ###############################
 threeWayCompetitionData = read.table(paste(dataInputDir,"ThreeWayCompetition_rawFreqData.tab",sep=""),sep="\t",header=TRUE)
@@ -1039,14 +1210,45 @@ threeWayCompetitionData$Title<-factor(threeWayCompetitionData$Title,levels = pas
 
 p1<-ggplot(threeWayCompetitionData,aes(x=t,y=Frequency,group=Marker,col=Marker))+geom_line(size=2)+xlab("Time (days)")+ylab("Frequency")+facet_wrap(Title~.,nrow=3)+theme_bw()+scale_color_manual(values=replicateColors)+ theme(legend.position="bottom",strip.text=element_text(size=13),strip.background=element_blank(),axis.text=element_text(size=10),axis.title=element_text(size=14))+scale_x_continuous(breaks=c(1,2,3))
 
-ggsave(p1,file=paste(outputDir,"FigureS8.svg",sep=""),width=180,height=135,units="mm")
-ggsave(p1,file=paste(outputDir,"FigureS8.png",sep=""),width=180,height=135,units="mm")
-
-
+ggsave(p1,file=paste(outputDir,"FigureS9.svg",sep=""),width=180,height=135,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS9.png",sep=""),width=180,height=135,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS9.pdf",sep=""),width=180,height=135,units="mm",device=cairo_pdf)
 
 ###############################
 #
-# Table S1
+# Figure S10
+#
+###############################
+#RawCompetitionDatavsE ln freq trajs
+melted = melt(gen1000VsEFile,id.vars=c("Flask","Experiment","Marker","Replicate"))
+melted$variable = gsub("t","",melted$variable)
+
+myDF <- data.frame(x=numeric(),y=numeric(),xerr = numeric(), yerr = numeric(),founder=character())
+for(exp in unique(gen1000VsEFile$Experiment)){
+  myRows = which(gen1000VsEFile$Experiment==exp)
+  if(NROW(myRows)<2){
+    next
+  }
+  kanRow = gen1000vsEDF$Name == gen1000VsEFile$Flask[myRows][gen1000VsEFile$Marker[myRows]=="Kan"]
+  ampRow = gen1000vsEDF$Name == gen1000VsEFile$Flask[myRows][gen1000VsEFile$Marker[myRows]=="Amp"]
+  if(sum(ampRow)==0 | sum(kanRow)==0){
+    next
+  }
+  myDF<-rbind(myDF,data.frame(x=gen1000vsEDF$Fitness[kanRow], y = gen1000vsEDF$Fitness[ampRow],xerr=gen1000vsEDF$stderror[kanRow],yerr=gen1000vsEDF$stderror[ampRow],founder=substr(gen1000VsEFile$Experiment[myRows[1]],1,1)))
+}
+
+#raw competition data anc vs E
+ancCompetitionDatavsE = melt(ancestorFile,id.vars=c("Flask","Experiment","Marker","Replicate"),value.name = "LnFreqRatio")
+ancCompetitionDatavsE$variable = gsub("t","",ancCompetitionDatavsE$variable)
+ancCompetitionDatavsE$Experiment = factor(substr(ancCompetitionDatavsE$Experiment,1,1),sourceOrganismsOrdered)
+p1<-ggplot(ancCompetitionDatavsE)+geom_line(aes(x=as.numeric(variable)*log2(10000),y=-LnFreqRatio,col=Experiment,group=Flask))+facet_wrap(Experiment ~ .,nrow=2)+theme_bw()+theme(legend.position="none")+xlab("Generation")+ylab("Log(Query Freq / E Freq)")+scale_color_manual(values=speciesColors)
+ggsave(p1,file=paste(outputDir,"FigureS10.svg",sep=""),width=180,height=135,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS10.png",sep=""),width=180,height=135,units="mm")
+ggsave(p1,file=paste(outputDir,"FigureS10.pdf",sep=""),width=180,height=135,units="mm",device=cairo_pdf)
+
+###############################
+#
+# Dataset S4
 #
 ###############################
 
@@ -1077,10 +1279,26 @@ write.table(selectedMuts2, file=TableS1FileName,sep="\t",col.names=TRUE,quote=FA
 print("Founder fitness")
 print(ancFitnessDFTrunc)
 
-
-
 print("number of evolved populations that did not significantly increase in fitness, B-H correction")
 print(sum(p.adjust(sort(pt(-abs(fitnessDFTrunc$Fitness/fitnessDFTrunc$stderror),df=3)),method="BH")>=0.05))
+
+print("number of evolved populations significantly more fit than E, 95% confidence interval")
+print(plyr::count(substr(gen1000vsEDFTrunc$Name[gen1000vsEDFTrunc$Fitness - gen1000vsEDFTrunc$stderror*1.96 > 0],1,1)))
+
+print("number of evolved populations significantly less fit than E, 95% confidence interval")
+print(plyr::count(substr(gen1000vsEDFTrunc$Name[gen1000vsEDFTrunc$Fitness + gen1000vsEDFTrunc$stderror*1.96 < 0],1,1)))
+
+
+print("Nested ANOVA ESY vs VAP fitness gain vs founders")
+infile<-read.table(paste0(outputDir,"Dataset_S2.txt"),header=TRUE,sep="\t")
+infile2<-infile[infile$Replicate != "Average",]
+infile2$Flask = c(1:NROW(infile2))
+infile2$Group = infile2$Reference %in% c("E","S","Y")
+print(summary(aov(lm(data=infile2, Fitness ~ Group / Reference / Query / Flask))))
+
+print("Average fitness of evolved populations relative to E")
+print(mydf2)
+
 
 print("Total num adaptive mutations excepting chr amplifications")
 print(NROW(selectedMutsMultipleHits))
@@ -1090,6 +1308,10 @@ print(NROW(selectedMutsMultipleHits)+NROW(chrAmptufAPopulations))
 
 print("Num genetic targets for adaptation")
 print(NROW(unique(c(as.character(selectedMutsMultipleHits$V1),"tufA"))))
+
+
+print("Anova fitness gain vs founder class (ESY vs VAP)")
+print(aov())
 
 #expected number of adaptive mutations and genetic targets for those mutations
 geneLengths = read.table(paste(dataInputDir,"MG1655_geneLengths.tab",sep=""),sep="\t",header=FALSE)
@@ -1103,25 +1325,14 @@ for(i in c(1:10000)){
 print("Expected FDR (%) of adapted mutations")
 print(100*mean(multinomResultsMuts)/(NROW(selectedMutsMultipleHits)))
 
-multinomResultsGenes = c()
-multinomResultsMuts = c()
-for(i in c(1:10000)){
-  multRes =   rmultinom(1,NROW(selectedMutsLowThresh),geneLengths$V4)
-  multinomResultsGenes = c(multinomResultsGenes, sum(multRes>1))
-  multinomResultsMuts = c(multinomResultsMuts, sum(multRes[multRes>1]))
-}
-print("Expected FDR (%) of adapted mutations w/ low threshold for calling variants")
-print(100*mean(multinomResultsMuts)/(NROW(selectedMutsLowMultipleHits)))
-
-
 print("Number of TM-specific adaptive mutations")
 print(sum(selectedMutsMultipleHits$V1 %in% translationGenes) + NROW(chrAmptufAPopulations))
 
+print("Number of TM-specific mutations in A and P founders")
+print(NROW(grep("[AP]",selectedMutsMultipleHits$V11[selectedMutsMultipleHits$V1 %in% translationGenes])) + NROW(grep("[AP]",chrAmptufAPopulations)))
+
 print("Number of TM-specific adapted genes")
 print(NROW(unique(c(as.character(selectedMutsMultipleHits$V1[selectedMutsMultipleHits$V1 %in% translationGenes]),"tufA"))))
-
-print("Number of TM annotated genes in the genome")
-print(NROW(translationGenes))
 
 multinomResultsGenes = c()
 multinomResultsMuts = c()
@@ -1136,76 +1347,271 @@ print(sum(multinomResultsMuts <= sum(selectedMutsMultipleHits$V1 %in% translatio
 print("Num translation genes")
 print(NROW(translationGenes))
 
-
-print("Percentage of E. coli genome that is the CDS of TM annotated genes")
-positionValues = rep(0,4641652)
-for(gene in translationGenes){
-  myRow = geneLengths[geneLengths$V1 == gene,]
-  if(NROW(myRow)==1){
-    positionValues[c(myRow$V2:myRow$V3)]=1
-  }
-}
-print(sum(positionValues)/4641652)
+print("Percentage of E. coli genome that is translation genes")
+print(sum(geneLengths$V4[geneLengths$V1 %in% translationGenes]) / sum(geneLengths$V4))
 
 print("Num populations with TM-specific mutations")
 print(NROW(unique(c(as.character(selectedMutsMultipleHits$V11[as.character(selectedMutsMultipleHits$V1) %in% translationGenes]),chrAmptufAPopulations ))))
 
-print("Num fixed TM-specific / generic mutations")
+print("Num fixed TM-specific / generic mutations in A and P excluding tufA amplifications")
+print(sum(mutTypeCountDF$numMuts[mutTypeCountDF$founder %in% c("A","P") & mutTypeCountDF$geneType=="TM-specific"]))
 
-myfun <- function(x){min(which(x))}
-selectedMutsMultipleHitsLowFitnessFoundersOnly = selectedMutsMultipleHits[gsub("_.","",selectedMutsMultipleHits$V11) %in% c("P","A","V"),]
-firstGenOverThreshAll = (as.numeric(apply(selectedMutsMultipleHitsLowFitnessFoundersOnly[,12:22]>0.95,1, myfun))-1)*100
+print("Contingency test # TM-specific vs generic mutations by founder including tufA amplifications")
+myCasted = dcast(mutIdentityDF, founder ~ locusClass)
+print(chisq.test(myCasted[,2:3]))
+
+print("Correlation between number of TM-specific mutations and founder fitness")
+myCasted = merge(myCasted,ancFitnessDFTrunc,by.x="founder",by.y="Founder")
+y = as.numeric(myCasted$`TM-specific`)
+x = -1*as.numeric(myCasted$Fitness)
+print(cor.test(x,y))
+
+print("Num fixed TM-specific / generic mutations in V excluding tufA amplifications")
+print(sum(mutTypeCountDF$numMuts[mutTypeCountDF$founder %in% c("V") & mutTypeCountDF$geneType=="TM-specific"]))
+
+print("Num fixed TM-specific / generic mutations in A and P including tufA amplifications")
+print(sum(mutCountDF$count[mutCountDF$founder %in% c("A","P") & mutCountDF$locusClass=="TM-specific"]))
+
+print("Num fixed TM-specific / generic mutations in V including tufA amplifications")
+print(sum(mutCountDF$count[mutCountDF$founder %in% c("V") & mutCountDF$locusClass=="TM-specific"]))
+
+
+myfun <- function(x){min(which(x),na.rm=TRUE)}
+firstGenOverThreshAll = (as.numeric(apply(selectedMutsMultipleHits[,12:22]>0.95,1, myfun))-1)*100
 firstGenOverThreshAll[!is.finite(firstGenOverThreshAll)]=NA
+mutFounders = substr(selectedMutsMultipleHits$V11,1,1)
 
-TMGeneFixCounts = data.frame(founder= character(), population = character(), totalTMMutCount=numeric(), TMFixMutCount = numeric(), TMFirstFixMutCount = numeric(), NonTMMutCount = numeric(), NonTMFixMutCount = numeric(), NonTMFirstFixMutCount=numeric())
-for(pop in sort(unique(selectedMutsMultipleHitsLowFitnessFoundersOnly$V11))){
-  subtable = selectedMutsMultipleHitsLowFitnessFoundersOnly[selectedMutsMultipleHitsLowFitnessFoundersOnly$V11==pop,]
-  firstGenThreshVals = firstGenOverThreshAll[selectedMutsMultipleHitsLowFitnessFoundersOnly$V11==pop]
-  TMGeneFixCounts = rbind(TMGeneFixCounts, data.frame(founder = gsub("_.","",pop), population = pop, totalTMMutCount = sum(subtable$V1 %in% translationGenes), TMFixMutCount=  sum(subtable$V1 %in% translationGenes & !is.na(firstGenThreshVals)),TMFirstFixMutCount= sum(subtable$V1 %in% translationGenes & firstGenThreshVals == min(firstGenThreshVals,na.rm=TRUE),na.rm=TRUE), NonTMMutCount = sum(!(subtable$V1 %in% translationGenes)), NonTMFixMutCount = sum(!(subtable$V1 %in% translationGenes) & !is.na(firstGenThreshVals)), NonTMFirstFixMutCount=sum(!(subtable$V1 %in% translationGenes) & firstGenThreshVals == min(firstGenThreshVals,na.rm=TRUE),na.rm=TRUE)))
+print("A,P TM muts fixed <= gen 300")
+x1<-sum(mutFounders %in% c("A","P") & firstGenOverThreshAll <= 300 & selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x1)
+print("A,P TM muts fixed > gen 300")
+x2<-sum(mutFounders %in% c("A","P") & firstGenOverThreshAll > 300 & selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x2)
+print("A,P Generic muts fixed <= gen 300")
+x3<-sum(mutFounders %in% c("A","P") & firstGenOverThreshAll <= 300 & ! selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x3)
+print("A,P Generic muts fixed > gen 300")
+x4<-sum(mutFounders %in% c("A","P") & firstGenOverThreshAll > 300 & ! selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x4)
+
+
+print("Fisher exact test on timing")
+print(fisher.test(matrix(c(x1,x2,x3,x4),nrow=2,ncol=2)))
+
+
+print("V,A,P TM muts fixed <= gen 300")
+x1<-sum(mutFounders %in% c("V","A","P") & firstGenOverThreshAll <= 300 & selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x1)
+print("A,P TM muts fixed > gen 300")
+x2<-sum(mutFounders %in% c("V","A","P") & firstGenOverThreshAll > 300 & selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x2)
+print("A,P Generic muts fixed <= gen 300")
+x3<-sum(mutFounders %in% c("V","A","P") & firstGenOverThreshAll <= 300 & ! selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x3)
+print("A,P Generic muts fixed > gen 300")
+x4<-sum(mutFounders %in% c("V","A","P") & firstGenOverThreshAll > 300 & ! selectedMutsMultipleHits$V1 %in% translationGenes,na.rm=TRUE)
+print(x4)
+
+
+print("Fisher exact test on timing")
+print(fisher.test(matrix(c(x1,x2,x3,x4),nrow=2,ncol=2)))
+
+
+print("rpsF mutations are in these populations")
+print(selectedMutsMultipleHits[selectedMutsMultipleHits$V1=="rpsF",])
+
+print("rpsG mutations are in these populations")
+print(selectedMutsMultipleHits[selectedMutsMultipleHits$V1=="rpsG",])
+
+print("fitness of reconstructions")
+print(reconstructedFitnessDFTrunc)
+
+
+trajectoryS <- function(freqs){
+  #print(freqs)
+  names(freqs) <- seq(0,1000,100)
+  if(sum(freqs==0,na.rm=TRUE)>0){
+    freqs = freqs[(max(which(freqs==0))+1):NROW(freqs)]  
+  }
+  if(sum(freqs==1,na.rm=TRUE)>0){
+    freqs = freqs[1:(min(which(freqs==1))-1)]
+  }
+  freqs2 = freqs[!is.na(freqs)]
+  
+  if(NROW(freqs2)<=1){
+    return(NA)
+  }
+  
+  
+  goodTimepointPairs = as.numeric(freqs2[-1] - freqs2[-NROW(freqs2)] >= 0.05)
+  
+  #print(goodTimepointPairs)
+  if(sum(goodTimepointPairs) ==0 ){
+    return(NA)
+  }
+  minTimepoint = min(which(goodTimepointPairs==1))
+  maxTimepoint = minTimepoint + min(which(goodTimepointPairs[(minTimepoint+1):NROW(goodTimepointPairs)]==0))
+  if(!is.finite(maxTimepoint)){
+    maxTimepoint = NROW(freqs2)
+  }
+  freqs2 = freqs2[minTimepoint:maxTimepoint]
+  x = as.numeric(names(freqs2))
+  y = as.numeric(freqs2)
+  y = log(y/(1-y))
+  myFitness = as.numeric(lm(y ~ x)$coefficients[2])
+  return(myFitness)
 }
-print(colSums(TMGeneFixCounts[,3:8])) #total number of TM muts, total num fixed, and total num fixed first
 
-print("Timing of fixation of TM-specific and generic mutations, mean and sem")
-print("Generic genes")
-print(mean(firstGenOverThreshAll[which(! selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes)],na.rm=TRUE)) #Generic genes
-print(sd(firstGenOverThreshAll[which(! selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes)],na.rm=TRUE) / sqrt(sum(! selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes & !is.na(firstGenOverThreshAll)))) #SEM Generic genes
-print("TM genes")
-print(mean(firstGenOverThreshAll[which(selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes)],na.rm=TRUE)) #TM genes
-print(sd(firstGenOverThreshAll[which(selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes)],na.rm=TRUE) / sqrt(sum( selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes & !is.na(firstGenOverThreshAll)))) #SEM TM genes
+myS = apply(selectedMutsMultipleHits,1,function(x){trajectoryS(as.numeric(x[12:22]))})
+selectedMutsMultipleHits$s = myS
+selectedMutsMultipleHits$t_est = (as.numeric(apply(selectedMutsMultipleHits[,12:22]>.1,1, myfun))-1)*100
+selectedMutsMultipleHits$t_fix = (as.numeric(apply(selectedMutsMultipleHits[,12:22]>.95,1, myfun))-1)*100
+selectedMutsMultipleHits$founder = substr(selectedMutsMultipleHits$V11,1,1)
 
-print("Num TM-specific mutations that fix after gen 600")
-print(sum(firstGenOverThreshAll[which(selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes)] > 600 , na.rm=TRUE))
+print("selection coefficients of TM muts in A,P pops that fix <=  gen 300 vs Generic muts that fix > gen 300 in A,P pops")
+print(t.test(selectedMutsMultipleHits$s[selectedMutsMultipleHits$founder %in% c("A","P") & selectedMutsMultipleHits$V1 %in% translationGenes & selectedMutsMultipleHits$t_fix<=300],selectedMutsMultipleHits$s[selectedMutsMultipleHits$founder %in% c("A","P") & !selectedMutsMultipleHits$V1 %in% translationGenes & selectedMutsMultipleHits$t_fix>300]))
 
-print("Num Generic mutations that fix after gen 600")
-print(sum(firstGenOverThreshAll[which(! selectedMutsMultipleHitsLowFitnessFoundersOnly$V1 %in% translationGenes)] > 600 , na.rm=TRUE))
 
-print("Mean fitness gain of Y populations")
-print(mean(fitnessDFTrunc$Fitness[fitnessFounderList=="Y"]))
+print(t.test(selectedMutsMultipleHits$s[selectedMutsMultipleHits$founder %in% c("A","P") & selectedMutsMultipleHits$t_est<=300 & is.finite(selectedMutsMultipleHits$t_est)],selectedMutsMultipleHits$s[selectedMutsMultipleHits$founder %in% c("A","P") & selectedMutsMultipleHits$t_est>300 & is.finite(selectedMutsMultipleHits$t_est)]))
 
-print("Avg num TM-specific fixations in V, A and P populations")
-print(as.numeric(colSums(TMGeneFixCounts[,3:8])[2])/18)
 
-print("Average fitness deficit (% per generation) of evolved V, A and P populations relative to E assuming fitness transitivity")
-fitnessFounderList = gsub("_.*","",fitnessDFTrunc$Name)
-fitnessFounderListFactor = factor(fitnessFounderList, levels = sourceOrganismsOrdered)
-ancFitnessFounderList = gsub(" .*","",ancFitnessDFTrunc$Name)
-ancFitnessFounderListFactor = factor(ancFitnessFounderList, levels = sourceOrganismsOrdered)
-ancFitnessDFTrunc$Founder = ancFitnessFounderList
-x = ancFitnessDFTrunc$Fitness[match(fitnessFounderList,ancFitnessFounderList)]
-y = fitnessDFTrunc$Fitness
-print(mean((x-y)[fitnessFounderList %in% c("V","A","P")]))
-
-print("Fitness gains of reconstructed mutations")
-print(reconstructedFitnessDFTrunc[c(1:2),])
-
-print("TM-specific founder entropy by gene randomizations")
+print("Benjamini-Hochberg corrected randomizations of gene-founder specificity aka data for figure 4A")
 print(geneEntropyDFTM)
 
-print("Generic founder entropy by gene randomizations")
+print("Benjamini-Hochberg corrected randomizations of gene-founder specificity aka data for figure 4B")
 print(geneEntropyDFGeneric)
 
-print("Fitness defect of E relative to wt E. coli")
-EvsWTFitnessDF$Fitness = EvsWTFitnessDF$Fitness*100
-EvsWTFitnessDF$stderror = EvsWTFitnessDF$stderror*100
-EvsWTFitnessDF$variance = EvsWTFitnessDF$variance*100^2
-print(EvsWTFitnessDF[NROW(EvsWTFitnessDF),])
+print("Number of mutations that occurred in a population that had already gained a mutation in that gene")
+print(sum(duplicated(paste(selectedMutsMultipleHits$V1,selectedMutsMultipleHits$V11))))
+
+print("Significant overdispersion in tufA and fimD across populations")
+
+myDF3 = mutIdentityDF[mutIdentityDF$gene != "tufA amp",]
+myDF3$founder = factor(myDF3$founder,levels=sourceOrganismsOrdered)
+castedDF2 = dcast(myDF3, gene ~ founder)
+castedDF2 = castedDF2[order(rowSums(castedDF2[,2:7])),]
+
+cumulativeProbability = 1
+observedPVals = c()
+for(row in c(1:NROW(castedDF2))){
+  numPossiblePopulations= sum(castedDF2[row,c(2:7)]>0)*6
+  numObservedMuts = sum(castedDF2[row,c(2:7)])
+  numObservedPopulations = NROW(unique(mutIdentityDF$population[mutIdentityDF$gene == as.character(castedDF2$gene[row])]))
+  numIterations = 10000
+  numObservationsOverdispersion = 0
+  numResampledPops = 0
+  resampledCounts = rep(0,min(numPossiblePopulations,numObservedMuts))
+  for(i in c(1:numIterations)){
+    mysamp = NROW(unique(sample(numPossiblePopulations,numObservedMuts,replace=TRUE)))
+    if(mysamp>=numObservedPopulations){
+      numObservationsOverdispersion = numObservationsOverdispersion+1
+    }
+    numResampledPops = numResampledPops + mysamp
+    resampledCounts[mysamp] = resampledCounts[mysamp] + 1
+  }
+  expectedMissedMuts = numObservedMuts*(1-numResampledPops/numObservedMuts/numIterations)
+  observedMissedMuts = numObservedMuts - numObservedPopulations
+  print(paste(castedDF2$gene[row], numPossiblePopulations, numObservedMuts, numObservedPopulations, expectedMissedMuts, observedMissedMuts - expectedMissedMuts, numObservationsOverdispersion/numIterations,paste(resampledCounts,collapse=" "),sep=" "))
+  if(numObservationsOverdispersion==0){
+    numObservationsOverdispersion = .5
+  }
+  cumulativeProbability = cumulativeProbability * numObservationsOverdispersion / numIterations
+  observedPVals = c(observedPVals,numObservationsOverdispersion/numIterations)
+}
+p.adjust(observedPVals,method="BH")
+
+print("Noncoding and synonymous mutations in tufA operon")
+print(plyr::count(selectedMutsMultipleHits$V5[selectedMutsMultipleHits$V1 %in% c("tufA","rpsG","fusA","rpsL")]))
+
+
+
+
+#entropy of TM genes across populations rather than founders
+
+
+numRandomizations = 10000
+
+geneByGeneEntropyPValues = c()
+geneByGeneSimpsonPValues = c()
+myGenes = c()
+
+randomD = rep(0,numRandomizations)
+randomEntropy = rep(0,numRandomizations)
+realEntropy = 0
+realD = 0
+myDF2 = mutIdentityDF[mutIdentityDF$gene %in% translationGenes,]
+for(gene in unique(myDF2$gene)){
+  numFounders = NROW(unique(myDF2$founder[myDF2$gene==gene]))
+  numExpectedPops = numFounders*6
+  numObservedPopCounts = plyr::count(myDF2$population[myDF2$gene==gene])$freq
+  totalNumMuts = sum(numObservedPopCounts)
+  observedEntropy = -1*sum(numObservedPopCounts/totalNumMuts * log(numObservedPopCounts/totalNumMuts))
+  observedD = (1-sum(numObservedPopCounts * (numObservedPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
+  realEntropy = realEntropy + observedEntropy
+  realD = realD + observedD
+  randEntropies = c()
+  randDs = c()
+  for(i in c(1:numRandomizations)){
+    randomPopCounts=plyr::count(sample(numExpectedPops,totalNumMuts,replace=TRUE))$freq
+    randE = -1*sum(randomPopCounts/totalNumMuts * log(randomPopCounts/totalNumMuts))
+    randD = (1-sum(randomPopCounts * (randomPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
+    randomEntropy[i] = randomEntropy[i] + randE
+    randomD[i] = randomD[i]  + randD
+    randEntropies = c(randEntropies,randE)
+    randDs = c(randDs, randD)
+  }
+  myGenes = c(myGenes,gene)
+  geneByGeneEntropyPValues = c(geneByGeneEntropyPValues, sum(randEntropies >= observedEntropy)/numRandomizations)
+  geneByGeneSimpsonPValues = c(geneByGeneSimpsonPValues, sum(randDs >= observedD)/numRandomizations)
+}
+sum(randomEntropy >= realEntropy)/numRandomizations
+sum(randomD >= realD)/numRandomizations
+
+
+myDF2 = mutIdentityDF[! mutIdentityDF$gene %in% c(translationGenes, "tufA amp"),]
+randomEntropy = rep(0,numRandomizations)
+realEntropy = 0
+realD = 0
+randomD = rep(0,numRandomizations)
+for(gene in unique(myDF2$gene)){
+  numFounders = NROW(unique(myDF2$founder[myDF2$gene==gene]))
+  numExpectedPops = numFounders*6
+  numObservedPopCounts = plyr::count(myDF2$population[myDF2$gene==gene])$freq
+  totalNumMuts = sum(numObservedPopCounts)
+  observedEntropy = -1*sum(numObservedPopCounts/totalNumMuts * log(numObservedPopCounts/totalNumMuts))
+  observedD = (1-sum(numObservedPopCounts * (numObservedPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
+  realEntropy = realEntropy + observedEntropy
+  realD = realD + observedD
+  randEntropies = c()
+  randDs = c()
+  for(i in c(1:numRandomizations)){
+    randomPopCounts=plyr::count(sample(numExpectedPops,totalNumMuts,replace=TRUE))$freq
+    randE = -1*sum(randomPopCounts/totalNumMuts * log(randomPopCounts/totalNumMuts))
+    randD = (1-sum(randomPopCounts * (randomPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
+    randomEntropy[i] = randomEntropy[i] + randE
+    randomD[i] = randomD[i]  + randD
+    randEntropies = c(randEntropies,randE)
+    randDs = c(randDs, randD)
+  }
+  myGenes = c(myGenes,gene)
+  geneByGeneEntropyPValues = c(geneByGeneEntropyPValues, sum(randEntropies >= observedEntropy)/numRandomizations)
+  geneByGeneSimpsonPValues = c(geneByGeneSimpsonPValues, sum(randDs >= observedD)/numRandomizations)
+}
+sum(randomEntropy >= realEntropy)/numRandomizations
+sum(randomD >= realD)/numRandomizations
+
+x1 <- p.adjust(geneByGeneEntropyPValues,method="BH")
+x2 <- p.adjust(geneByGeneSimpsonPValues,method="BH")
+x3 <- p.adjust(1-geneByGeneEntropyPValues,method="BH")
+x4 <- p.adjust(1-geneByGeneSimpsonPValues,method="BH")
+print(myGenes[x1 < 0.1])
+print(x1[x1 < 0.1])
+
+print(myGenes[x2 < 0.1])
+print(x2[x2 < 0.1])
+
+print(myGenes[x3 < 0.1])
+print(x3[x3 < 0.1])
+
+print(myGenes[x4 < 0.1])
+print(x4[x4 < 0.1])
