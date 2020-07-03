@@ -1,3 +1,26 @@
+#####################################################################################################
+#
+#
+# Venkataram S, Monasky R, Sikaroodi SH, Kryazhimskiy S and Kacar B
+# Evolutionary stalling and a limit on the power of natural selection to improve a cellular module
+# Proceedings of the National Academy of Sciences, 2020
+#
+#
+# Master script for generating figures and calculating statistics
+# 
+# To run successfully, install all libraries below, download and extract the entire github repository,
+# set the working directory to the directory containing this script "generateFigures.R" and then run the script
+# Output files will be generated in the PlotsAndTables/ subdirectory. Minor cosmetic postprocessing has been done for many 
+# figures present in the publication using Inkscape.
+#
+# Updated July 02, 2020
+# Code written by Sandeep Venkataram
+# sandeep.venkataram@gmail.com
+#
+#
+#
+#####################################################################################################
+
 library(ggplot2)
 library(plyr)
 library(reshape2)
@@ -124,10 +147,10 @@ getFitnessData <- function(myInputFile){
 	return(fitnessDF)
 }
 
-fitnessDF = getFitnessData(inputFile)
-write.table(fitnessDF,file=paste(outputDir,"rawFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S2
-
+fitnessDF = getFitnessData(inputFile[!grepl("E.*E",inputFile$Experiment),])
 ancFitnessDF = getFitnessData(ancestorFile)
+
+EInputFile = rbind(inputFile[grepl("E.*E",inputFile$Experiment),],gen1000VsEFile[grepl("E.*E",gen1000VsEFile$Experiment),])
 
 #The expected fitness value of competition between two E strains is 0. The observed fitness is used to calculate variance of the fitness estimation
 myRows = which(ancFitnessDF$Name %in% ancestorFile$Flask[ancestorFile$Experiment=="E vs E"])
@@ -135,18 +158,19 @@ ancFitnessDF$Fitness[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=0
 ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=mean((ancFitnessDF$Fitness[myRows])^2)
 ancFitnessDF$stderror[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]=sqrt(ancFitnessDF$variance[ancFitnessDF$Name == "E vs E_allFlasks_averaged"]/NROW(myRows))
 
-write.table(ancFitnessDF,file=paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Table 1 / Dataset S1
-
 reconstructedFitnessDF = getFitnessData(reconstructedFile)
-write.table(reconstructedFitnessDF,file=paste(outputDir,"reconstructedFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S5
-
 EvsWTFitnessDF = getFitnessData(EvsWTFile)
-write.table(EvsWTFitnessDF,file=paste(outputDir,"EvsWTFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S6
+gen1000vsEDF = getFitnessData(gen1000VsEFile[!grepl("E.*E",gen1000VsEFile$Experiment),])
+EFitnessData = getFitnessData(EInputFile)
 
-gen1000vsEDF = getFitnessData(gen1000VsEFile)
+fitnessDF = rbind(EFitnessData,fitnessDF)
+gen1000vsEDF = rbind(EFitnessData,gen1000vsEDF)
+
 write.table(gen1000vsEDF,file=paste(outputDir,"gen1000vsEFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S3
-
-
+write.table(fitnessDF,file=paste(outputDir,"rawFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S2
+write.table(EvsWTFitnessDF,file=paste(outputDir,"EvsWTFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S6
+write.table(reconstructedFitnessDF,file=paste(outputDir,"reconstructedFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Dataset S5
+write.table(ancFitnessDF,file=paste(outputDir,"ancFitnessData.tab",sep=""),sep="\t",row.names=FALSE,quote=FALSE) #Table 1 / Dataset S1
 
 ###############################
 #
@@ -1518,100 +1542,7 @@ for(row in c(1:NROW(castedDF2))){
   cumulativeProbability = cumulativeProbability * numObservationsOverdispersion / numIterations
   observedPVals = c(observedPVals,numObservationsOverdispersion/numIterations)
 }
-p.adjust(observedPVals,method="BH")
+print(p.adjust(observedPVals,method="BH"))
 
 print("Noncoding and synonymous mutations in tufA operon")
 print(plyr::count(selectedMutsMultipleHits$V5[selectedMutsMultipleHits$V1 %in% c("tufA","rpsG","fusA","rpsL")]))
-
-
-
-
-#entropy of TM genes across populations rather than founders
-
-
-numRandomizations = 10000
-
-geneByGeneEntropyPValues = c()
-geneByGeneSimpsonPValues = c()
-myGenes = c()
-
-randomD = rep(0,numRandomizations)
-randomEntropy = rep(0,numRandomizations)
-realEntropy = 0
-realD = 0
-myDF2 = mutIdentityDF[mutIdentityDF$gene %in% translationGenes,]
-for(gene in unique(myDF2$gene)){
-  numFounders = NROW(unique(myDF2$founder[myDF2$gene==gene]))
-  numExpectedPops = numFounders*6
-  numObservedPopCounts = plyr::count(myDF2$population[myDF2$gene==gene])$freq
-  totalNumMuts = sum(numObservedPopCounts)
-  observedEntropy = -1*sum(numObservedPopCounts/totalNumMuts * log(numObservedPopCounts/totalNumMuts))
-  observedD = (1-sum(numObservedPopCounts * (numObservedPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
-  realEntropy = realEntropy + observedEntropy
-  realD = realD + observedD
-  randEntropies = c()
-  randDs = c()
-  for(i in c(1:numRandomizations)){
-    randomPopCounts=plyr::count(sample(numExpectedPops,totalNumMuts,replace=TRUE))$freq
-    randE = -1*sum(randomPopCounts/totalNumMuts * log(randomPopCounts/totalNumMuts))
-    randD = (1-sum(randomPopCounts * (randomPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
-    randomEntropy[i] = randomEntropy[i] + randE
-    randomD[i] = randomD[i]  + randD
-    randEntropies = c(randEntropies,randE)
-    randDs = c(randDs, randD)
-  }
-  myGenes = c(myGenes,gene)
-  geneByGeneEntropyPValues = c(geneByGeneEntropyPValues, sum(randEntropies >= observedEntropy)/numRandomizations)
-  geneByGeneSimpsonPValues = c(geneByGeneSimpsonPValues, sum(randDs >= observedD)/numRandomizations)
-}
-sum(randomEntropy >= realEntropy)/numRandomizations
-sum(randomD >= realD)/numRandomizations
-
-
-myDF2 = mutIdentityDF[! mutIdentityDF$gene %in% c(translationGenes, "tufA amp"),]
-randomEntropy = rep(0,numRandomizations)
-realEntropy = 0
-realD = 0
-randomD = rep(0,numRandomizations)
-for(gene in unique(myDF2$gene)){
-  numFounders = NROW(unique(myDF2$founder[myDF2$gene==gene]))
-  numExpectedPops = numFounders*6
-  numObservedPopCounts = plyr::count(myDF2$population[myDF2$gene==gene])$freq
-  totalNumMuts = sum(numObservedPopCounts)
-  observedEntropy = -1*sum(numObservedPopCounts/totalNumMuts * log(numObservedPopCounts/totalNumMuts))
-  observedD = (1-sum(numObservedPopCounts * (numObservedPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
-  realEntropy = realEntropy + observedEntropy
-  realD = realD + observedD
-  randEntropies = c()
-  randDs = c()
-  for(i in c(1:numRandomizations)){
-    randomPopCounts=plyr::count(sample(numExpectedPops,totalNumMuts,replace=TRUE))$freq
-    randE = -1*sum(randomPopCounts/totalNumMuts * log(randomPopCounts/totalNumMuts))
-    randD = (1-sum(randomPopCounts * (randomPopCounts-1))/(totalNumMuts * (totalNumMuts-1)))
-    randomEntropy[i] = randomEntropy[i] + randE
-    randomD[i] = randomD[i]  + randD
-    randEntropies = c(randEntropies,randE)
-    randDs = c(randDs, randD)
-  }
-  myGenes = c(myGenes,gene)
-  geneByGeneEntropyPValues = c(geneByGeneEntropyPValues, sum(randEntropies >= observedEntropy)/numRandomizations)
-  geneByGeneSimpsonPValues = c(geneByGeneSimpsonPValues, sum(randDs >= observedD)/numRandomizations)
-}
-sum(randomEntropy >= realEntropy)/numRandomizations
-sum(randomD >= realD)/numRandomizations
-
-x1 <- p.adjust(geneByGeneEntropyPValues,method="BH")
-x2 <- p.adjust(geneByGeneSimpsonPValues,method="BH")
-x3 <- p.adjust(1-geneByGeneEntropyPValues,method="BH")
-x4 <- p.adjust(1-geneByGeneSimpsonPValues,method="BH")
-print(myGenes[x1 < 0.1])
-print(x1[x1 < 0.1])
-
-print(myGenes[x2 < 0.1])
-print(x2[x2 < 0.1])
-
-print(myGenes[x3 < 0.1])
-print(x3[x3 < 0.1])
-
-print(myGenes[x4 < 0.1])
-print(x4[x4 < 0.1])
